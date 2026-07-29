@@ -162,7 +162,7 @@ If OpenCloud logs show `WopiDiscovery: wopi app url failed with unexpected code 
 
 2. **Hairpin NAT / internal HTTPS calls** — OpenCloud fetches `https://<euro-office-domain>/hosting/discovery` from inside Docker. The generated overlay maps your public domains to `host-gateway` so those requests reach Caddy on the host without relying on NAT loopback.
 
-3. **JWT mismatch** — Euro Office `JWT_SECRET` must match OpenCloud `COLLABORATION_WOPI_SECRET` (not `COLLABORATION_JWT_SECRET`, which breaks internal REVA tokens). Re-run `bash apply.sh`; it writes `euro-office-config/local.json` and mounts it into the container. If JWT was wrong on first boot, remove `<data-root>/euro-office` and re-apply.
+3. **JWT mismatch** — Euro Office `JWT_SECRET` must match OpenCloud `COLLABORATION_WOPI_SECRET` (not `COLLABORATION_JWT_SECRET`, which breaks internal REVA tokens). Both are set from `.opencloud-easy-deploy/secrets.yaml` on apply. If JWT was wrong on first boot, remove `<data-root>/euro-office` and re-apply so Euro Office regenerates its persisted secrets.
 
 4. **X-Frame-Options / iframe blocked** — If the browser console shows Euro Office blocked by `X-Frame-Options: sameorigin`, re-run `bash apply.sh` so Caddy sets `Content-Security-Policy: frame-ancestors` for the Euro Office domain instead.
 

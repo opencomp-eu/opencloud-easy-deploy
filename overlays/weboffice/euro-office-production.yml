@@ -22,8 +22,6 @@ services:
       ALLOW_PRIVATE_IP_ADDRESS: "true"
     volumes:
       - ${EURO_OFFICE_DATA_DIR}:/var/www/euro-office/Data
-      # Mount only local.json — do not replace the whole config dir (nginx/ds.conf lives there).
-      - ${EURO_OFFICE_CONFIG_DIR}/local.json:/etc/euro-office/documentserver/local.json:ro
     healthcheck:
       test:
         [

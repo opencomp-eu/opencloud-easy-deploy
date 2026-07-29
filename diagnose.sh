@@ -122,11 +122,11 @@ if docker inspect opencloud &>/dev/null; then
 fi
 
 if docker inspect euro-office &>/dev/null; then
-	section "Euro Office JWT config"
-	if docker exec euro-office test -f /etc/euro-office/documentserver/local.json 2>/dev/null; then
-		success "local.json mounted at /etc/euro-office/documentserver/local.json"
+	section "Euro Office JWT (env)"
+	if docker exec euro-office printenv JWT_SECRET 2>/dev/null | grep -q .; then
+		success "JWT_SECRET is set via container environment"
 	else
-		warn "local.json not mounted — JWT may come from auto-generated data volume"
+		warn "JWT_SECRET not set — document editing will fail"
 	fi
 fi
 
