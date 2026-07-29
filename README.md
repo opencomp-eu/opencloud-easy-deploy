@@ -36,6 +36,8 @@ bash apply.sh
 | `bash wizard.sh` | Interactive `deploy.yaml` creator + apply |
 | `bash start.sh` / `stop.sh` | Lifecycle without re-rendering |
 | `bash update.sh` | Pull submodule + images, re-apply, restart |
+| `bash backup.sh` | Run Borg backup now (when `backup.enabled`) |
+| `bash restore.sh` | List or restore from Borg archives |
 | `bash uninstall.sh` | Remove generated runtime files (keeps data) |
 
 ## deploy.yaml overview
@@ -47,6 +49,7 @@ See [`deploy.yaml.example`](deploy.yaml.example). Key sections:
 - **auth** — `builtin` (simple admin login) or `oidc` (external IdP)
 - **weboffice** — `euro_office` or `collabora` (mutually exclusive with each other)
 - **modules** — optional search, antivirus, radicale, monitoring
+- **backup** — optional Borg backups to a local repository
 
 ## Authentication modes
 
@@ -136,6 +139,62 @@ bash update.sh
 | `DEMO_USERS` | enabled | `false` |
 | Secrets | hardcoded | generated, mode `0600` |
 | Config | ephemeral | persistent paths outside submodule |
+
+## Backups (Borg)
+
+Enable in `deploy.yaml`:
+
+```yaml
+backup:
+  enabled: true
+  repository:
+    type: local
+    path: /var/backups/opencloud
+  schedule:
+    enabled: true
+    calendar: "*-*-* 03:00:00"
+    persistent: true
+  retention:
+    keep_daily: 7
+    keep_weekly: 4
+    keep_monthly: 6
+    keep_yearly: 0
+```
+
+Then run `bash apply.sh` to generate backup config and a `BORG_PASSPHRASE` in `.opencloud-easy-deploy/secrets.yaml`.
+
+**Run a backup now:**
+
+```bash
+bash backup.sh
+```
+
+**List archives:**
+
+```bash
+bash restore.sh --list
+```
+
+**Restore on this host or a fresh VPS:**
+
+```bash
+bash stop.sh
+bash restore.sh --latest
+bash apply.sh
+bash start.sh
+```
+
+Backups include OpenCloud data/config/apps, LDAP state (if OIDC), Euro Office data, `deploy.yaml`, and `secrets.yaml`.
+
+For scheduled backups, `apply.sh` writes systemd unit files to `.opencloud-easy-deploy/backup/systemd/`. Install them:
+
+```bash
+sudo cp .opencloud-easy-deploy/backup/systemd/opencloud-backup.* /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now opencloud-backup.timer
+```
+
+Store the Borg passphrase safely — without it, backups cannot be restored. For off-site safety, sync `/var/backups/opencloud` to another machine (rsync, restic, object storage, etc.).
 
 ## Development
 
