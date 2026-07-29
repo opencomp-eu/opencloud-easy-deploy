@@ -53,6 +53,7 @@ def _base_config(**overrides) -> dict:
 def test_derive_compose_files_builtin_euro_office():
     files = derive_compose_files(_base_config())
     assert files[0] == "docker-compose.yml"
+    assert "../overlays/proxy/caddy.yml" in files
     assert "external-proxy/opencloud.yml" in files
     assert "weboffice/euro-office.yml" in files
     assert "external-proxy/euro-office.yml" in files
@@ -113,6 +114,7 @@ def test_build_env_vars_production_defaults():
     assert env["EURO_OFFICE_DOMAIN"] == "eurooffice.test.example"
     assert env["EURO_OFFICE_JWT_SECRET"] == "jwt-secret"
     assert env["EURO_OFFICE_DATA_DIR"] == "/var/lib/opencloud/euro-office"
+    assert env["OCD_CADDYFILE"].endswith("/caddy/Caddyfile")
     assert "idm/external-idp.yml" not in env["COMPOSE_FILE"]
 
 

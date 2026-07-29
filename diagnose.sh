@@ -62,12 +62,17 @@ else
 	warn "euro-office container not running"
 fi
 
-section "Docker DNS from Caddy → Euro Office (internal)"
+section "Docker DNS from Caddy → backends (same compose network)"
 if docker inspect opencloud_caddy &>/dev/null; then
-	if docker exec opencloud_caddy wget -qO- http://euro-office/hosting/discovery 2>/dev/null | head -5; then
+	if docker exec opencloud_caddy wget -qO- http://opencloud:9200/ 2>/dev/null | head -1; then
+		success "Caddy can reach http://opencloud:9200"
+	else
+		error "Caddy cannot reach opencloud:9200"
+	fi
+	if docker exec opencloud_caddy wget -qO- http://euro-office/hosting/discovery 2>/dev/null | head -3; then
 		success "Caddy can reach http://euro-office/hosting/discovery"
 	else
-		error "Caddy cannot reach euro-office:80 — check container_name and opencloud-net"
+		error "Caddy cannot reach euro-office:80"
 	fi
 else
 	warn "Caddy container opencloud_caddy not running"
@@ -104,5 +109,5 @@ fi
 section "Recent OpenCloud collaboration errors"
 docker logs opencloud --since 5m 2>&1 | grep -E 'WopiDiscovery|collaboration|502' | tail -10 || echo "  (none)"
 
-echo
-info "If internal discovery works but errors persist, run: bash apply.sh"
+	echo
+	info "If WOPI errors are old but Euro Office is ready now: docker restart opencloud"

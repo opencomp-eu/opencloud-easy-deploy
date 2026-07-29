@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# stop.sh — stop Caddy and OpenCloud stack (data preserved)
+# stop.sh — stop OpenCloud stack and Caddy (data preserved)
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -13,10 +13,13 @@ if [[ -f "$COMPOSE_ENV" ]]; then
 	load_deploy_env "$COMPOSE_ENV"
 fi
 
-info "Stopping Caddy…"
-(cd "${SCRIPT_DIR}/caddy" && "${DOCKER_COMPOSE[@]}" down || true)
-
 info "Stopping OpenCloud stack…"
 (cd "${SCRIPT_DIR}/opencloud-compose" && "${DOCKER_COMPOSE[@]}" down --remove-orphans || true)
+
+# Legacy standalone Caddy from older installs.
+if [[ -f "${SCRIPT_DIR}/caddy/docker-compose.yml" ]]; then
+	info "Stopping legacy Caddy stack…"
+	(cd "${SCRIPT_DIR}/caddy" && "${DOCKER_COMPOSE[@]}" down || true)
+fi
 
 success "All services stopped. Data directories are unchanged."

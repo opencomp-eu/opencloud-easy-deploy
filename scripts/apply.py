@@ -116,7 +116,7 @@ def validate_config(config: dict) -> None:
 
 
 def derive_compose_files(config: dict) -> list[str]:
-    files = ["docker-compose.yml", "external-proxy/opencloud.yml"]
+    files = ["docker-compose.yml", "external-proxy/opencloud.yml", "../overlays/proxy/caddy.yml"]
 
     weboffice = config.get("weboffice") or {}
     if to_bool(weboffice.get("enabled")):
@@ -242,6 +242,7 @@ def build_env_vars(config: dict, secrets: dict[str, str]) -> dict[str, str]:
         "OC_APPS_DIR": str(opencloud["apps_dir"]),
         "DEFAULT_LANGUAGE": str(opencloud.get("language") or "en"),
         "START_ADDITIONAL_SERVICES": build_additional_services(config),
+        "OCD_CADDYFILE": str(CADDYFILE.resolve()),
     }
 
     ldap_base = Path(str(opencloud["config_dir"])).parent
@@ -504,6 +505,18 @@ def wait_for_euro_office(timeout_seconds: int = 600) -> bool:
     return False
 
 
+def stop_legacy_caddy() -> None:
+    """Remove Caddy from the old separate compose project if it still exists."""
+    legacy_compose = CADDY_DIR / "docker-compose.yml"
+    if not legacy_compose.is_file():
+        return
+    subprocess.run(
+        docker_compose_cmd() + ["-f", str(legacy_compose), "down"],
+        cwd=CADDY_DIR,
+        capture_output=True,
+    )
+
+
 def reconcile_runtime(env_path: Path, config: dict) -> None:
     env = {}
     if env_path.is_file():
@@ -514,16 +527,12 @@ def reconcile_runtime(env_path: Path, config: dict) -> None:
             env[key.strip()] = value.strip()
 
     ensure_docker_network("opencloud-net")
+    stop_legacy_caddy()
 
     print("Pulling OpenCloud stack images…")
     run_compose(COMPOSE_DIR, "pull", env=env)
 
-    # Caddy must be up before OpenCloud probes public WOPI/Euro Office URLs, and
-    # container_name overlays require recreate (not a plain stop/start).
-    print("Starting Caddy reverse proxy…")
-    run_compose(CADDY_DIR, "up", "-d", "--force-recreate")
-
-    print("Starting OpenCloud stack…")
+    print("Starting OpenCloud stack (includes Caddy)…")
     run_compose(COMPOSE_DIR, "up", "-d", "--force-recreate", env=env)
 
     weboffice = config.get("weboffice") or {}
