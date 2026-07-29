@@ -164,13 +164,12 @@ If OpenCloud logs show `WopiDiscovery: wopi app url failed with unexpected code 
 
 3. **JWT mismatch** — Euro Office must receive the same `JWT_SECRET` as OpenCloud's collaboration service. Re-run `bash apply.sh` to regenerate the overlay; Euro Office data is persisted under `<data-root>/euro-office`.
 
-After updating, recreate the stack:
+After updating, recreate the stack (a plain `stop.sh` / `start.sh` is not enough when networking overlays change):
 
 ```bash
 bash apply.sh
+bash diagnose.sh
 ```
-
-Verify Euro Office discovery:
 
 ```bash
 curl -fsS "https://eurooffice.example.com/hosting/discovery" | head

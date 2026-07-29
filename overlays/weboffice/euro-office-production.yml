@@ -1,15 +1,22 @@
 ---
 services:
   opencloud:
-    container_name: opencloud
+    depends_on:
+      euro-office:
+        condition: service_healthy
     environment:
+      # Server-side WOPI discovery over the Docker network (no Caddy/hairpin needed).
+      COLLABORATION_APP_ADDR: http://euro-office
+      COLLABORATION_APP_INSECURE: "true"
+      COLLABORATION_APP_ICON: https://${EURO_OFFICE_DOMAIN}/web-apps/apps/documenteditor/main/resources/img/favicon.ico
       COLLABORATION_JWT_SECRET: ${EURO_OFFICE_JWT_SECRET}
       COLLABORATION_WOPI_SECRET: ${EURO_OFFICE_JWT_SECRET}
 
   euro-office:
-    container_name: euro-office
     environment:
       JWT_ENABLED: "true"
       JWT_SECRET: ${EURO_OFFICE_JWT_SECRET}
+      WOPI_ENABLED: "true"
+      ALLOW_PRIVATE_IP_ADDRESS: "true"
     volumes:
       - ${EURO_OFFICE_DATA_DIR}:/var/www/euro-office/Data

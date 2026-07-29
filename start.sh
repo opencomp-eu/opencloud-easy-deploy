@@ -15,10 +15,15 @@ if [[ -f "$COMPOSE_ENV" ]]; then
 	load_deploy_env "$COMPOSE_ENV"
 fi
 
+info "Starting Caddy…"
+(cd "${SCRIPT_DIR}/caddy" && "${DOCKER_COMPOSE[@]}" up -d)
+
 info "Starting OpenCloud stack…"
 (cd "${SCRIPT_DIR}/opencloud-compose" && "${DOCKER_COMPOSE[@]}" up -d)
 
-info "Starting Caddy…"
-(cd "${SCRIPT_DIR}/caddy" && "${DOCKER_COMPOSE[@]}" up -d)
+if docker inspect opencloud &>/dev/null; then
+	info "Restarting OpenCloud to refresh WOPI discovery…"
+	docker restart opencloud >/dev/null
+fi
 
 success "All services started."

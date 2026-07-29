@@ -484,11 +484,21 @@ def reconcile_runtime(env_path: Path) -> None:
 
     print("Pulling OpenCloud stack images…")
     run_compose(COMPOSE_DIR, "pull", env=env)
-    print("Starting OpenCloud stack…")
-    run_compose(COMPOSE_DIR, "up", "-d", env=env)
 
+    # Caddy must be up before OpenCloud probes public WOPI/Euro Office URLs, and
+    # container_name overlays require recreate (not a plain stop/start).
     print("Starting Caddy reverse proxy…")
-    run_compose(CADDY_DIR, "up", "-d")
+    run_compose(CADDY_DIR, "up", "-d", "--force-recreate")
+
+    print("Starting OpenCloud stack…")
+    run_compose(COMPOSE_DIR, "up", "-d", "--force-recreate", env=env)
+
+    if subprocess.run(
+        ["docker", "inspect", "opencloud"],
+        capture_output=True,
+    ).returncode == 0:
+        print("Restarting OpenCloud to retry WOPI discovery…")
+        subprocess.run(["docker", "restart", "opencloud"], check=True)
 
 
 def print_summary(config: dict) -> None:
