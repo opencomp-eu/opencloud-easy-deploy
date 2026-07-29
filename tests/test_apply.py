@@ -11,6 +11,7 @@ import yaml
 from scripts.apply import (
     build_env_vars,
     derive_compose_files,
+    render_network_overlay,
     render_template,
     validate_config,
 )
@@ -55,6 +56,8 @@ def test_derive_compose_files_builtin_euro_office():
     assert "external-proxy/opencloud.yml" in files
     assert "weboffice/euro-office.yml" in files
     assert "external-proxy/euro-office.yml" in files
+    assert "../overlays/weboffice/euro-office-production.yml" in files
+    assert "../.opencloud-easy-deploy/compose/network-fixups.yml" in files
     assert "idm/external-idp.yml" not in files
 
 
@@ -109,6 +112,7 @@ def test_build_env_vars_production_defaults():
     assert env["OC_DOMAIN"] == "cloud.test.example"
     assert env["EURO_OFFICE_DOMAIN"] == "eurooffice.test.example"
     assert env["EURO_OFFICE_JWT_SECRET"] == "jwt-secret"
+    assert env["EURO_OFFICE_DATA_DIR"] == "/var/lib/opencloud/euro-office"
     assert "idm/external-idp.yml" not in env["COMPOSE_FILE"]
 
 
@@ -163,3 +167,18 @@ def test_antivirus_adds_start_additional_services():
         },
     )
     assert env["START_ADDITIONAL_SERVICES"] == "antivirus"
+
+
+def test_render_network_overlay_sets_container_names(tmp_path, monkeypatch):
+    from scripts import apply as apply_module
+
+    overlay_path = tmp_path / "network-fixups.yml"
+    monkeypatch.setattr(apply_module, "NETWORK_OVERLAY_PATH", overlay_path)
+
+    render_network_overlay(_base_config())
+    data = yaml.safe_load(overlay_path.read_text())
+
+    assert data["services"]["opencloud"]["container_name"] == "opencloud"
+    assert data["services"]["euro-office"]["container_name"] == "euro-office"
+    assert "eurooffice.test.example:host-gateway" in data["services"]["opencloud"]["extra_hosts"]
+    assert "cloud.test.example:host-gateway" in data["services"]["euro-office"]["extra_hosts"]

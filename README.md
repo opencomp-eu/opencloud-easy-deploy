@@ -152,6 +152,30 @@ Apply without starting containers (render only):
 bash apply.sh --no-reconcile-runtime
 ```
 
+## Troubleshooting
+
+### 502 Bad Gateway / WOPI discovery errors
+
+If OpenCloud logs show `WopiDiscovery: wopi app url failed with unexpected code HttpCode=502`, common causes are:
+
+1. **Caddy cannot reach backend containers** — Caddy runs in a separate Compose project from OpenCloud/Euro Office. This project sets stable `container_name` values (`opencloud`, `euro-office`) and generates a network overlay so Caddy can proxy to them on `opencloud-net`.
+
+2. **Hairpin NAT / internal HTTPS calls** — OpenCloud fetches `https://<euro-office-domain>/hosting/discovery` from inside Docker. The generated overlay maps your public domains to `host-gateway` so those requests reach Caddy on the host without relying on NAT loopback.
+
+3. **JWT mismatch** — Euro Office must receive the same `JWT_SECRET` as OpenCloud's collaboration service. Re-run `bash apply.sh` to regenerate the overlay; Euro Office data is persisted under `<data-root>/euro-office`.
+
+After updating, recreate the stack:
+
+```bash
+bash apply.sh
+```
+
+Verify Euro Office discovery:
+
+```bash
+curl -fsS "https://eurooffice.example.com/hosting/discovery" | head
+```
+
 ## License
 
 See upstream [opencloud-compose](https://github.com/opencloud-eu/opencloud-compose) for OpenCloud licensing. This deployment tooling is provided as-is.

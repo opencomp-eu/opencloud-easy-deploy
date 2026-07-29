@@ -1,0 +1,15 @@
+---
+services:
+  opencloud:
+    container_name: opencloud
+    environment:
+      COLLABORATION_JWT_SECRET: ${EURO_OFFICE_JWT_SECRET}
+      COLLABORATION_WOPI_SECRET: ${EURO_OFFICE_JWT_SECRET}
+
+  euro-office:
+    container_name: euro-office
+    environment:
+      JWT_ENABLED: "true"
+      JWT_SECRET: ${EURO_OFFICE_JWT_SECRET}
+    volumes:
+      - ${EURO_OFFICE_DATA_DIR}:/var/www/euro-office/Data

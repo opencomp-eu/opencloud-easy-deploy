@@ -19,6 +19,7 @@ COMPOSE_DIR = PROJECT_ROOT / "opencloud-compose"
 STATE_DIR = PROJECT_ROOT / ".opencloud-easy-deploy"
 SECRETS_PATH = STATE_DIR / "secrets.yaml"
 DEPLOY_PATH = PROJECT_ROOT / "deploy.yaml"
+NETWORK_OVERLAY_PATH = STATE_DIR / "compose" / "network-fixups.yml"
 CADDY_DIR = PROJECT_ROOT / "caddy"
 CADDY_TEMPLATE = CADDY_DIR / "Caddyfile.template"
 CADDYFILE = CADDY_DIR / "Caddyfile"
@@ -121,7 +122,11 @@ def derive_compose_files(config: dict) -> list[str]:
         office_type = str(weboffice.get("type") or "euro_office").strip().lower()
         if office_type == "euro_office":
             files.extend(
-                ["weboffice/euro-office.yml", "external-proxy/euro-office.yml"]
+                [
+                    "weboffice/euro-office.yml",
+                    "external-proxy/euro-office.yml",
+                    "../overlays/weboffice/euro-office-production.yml",
+                ]
             )
         elif office_type == "collabora":
             files.extend(
@@ -142,7 +147,44 @@ def derive_compose_files(config: dict) -> list[str]:
     if to_bool(modules.get("monitoring")):
         files.append("monitoring/monitoring.yml")
 
+    files.append("../.opencloud-easy-deploy/compose/network-fixups.yml")
+
     return files
+
+
+def render_network_overlay(config: dict) -> None:
+    """Stable Docker DNS names and host-gateway routes for cross-stack proxy/WOPI."""
+    opencloud_domain = str(config["opencloud"]["domain"])
+    weboffice = config.get("weboffice") or {}
+
+    opencloud_service: dict[str, Any] = {
+        "container_name": "opencloud",
+        "extra_hosts": [f"{opencloud_domain}:host-gateway"],
+    }
+
+    services: dict[str, Any] = {"opencloud": opencloud_service}
+
+    if to_bool(weboffice.get("enabled")):
+        office_domain = str(weboffice.get("domain") or "")
+        office_type = str(weboffice.get("type") or "euro_office").strip().lower()
+
+        if office_domain:
+            opencloud_service["extra_hosts"].append(f"{office_domain}:host-gateway")
+
+        if office_type == "euro_office":
+            services["euro-office"] = {
+                "container_name": "euro-office",
+                "extra_hosts": [f"{opencloud_domain}:host-gateway"],
+            }
+        elif office_type == "collabora":
+            services["collabora"] = {
+                "container_name": "collabora",
+                "extra_hosts": [f"{opencloud_domain}:host-gateway"],
+            }
+
+    NETWORK_OVERLAY_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with NETWORK_OVERLAY_PATH.open("w") as handle:
+        yaml.safe_dump({"services": services}, handle, default_flow_style=False)
 
 
 def generate_secret(length: int = 32) -> str:
@@ -205,6 +247,8 @@ def build_env_vars(config: dict, secrets: dict[str, str]) -> dict[str, str]:
     env["LDAP_CERTS_DIR"] = str(ldap_base / "ldap_certs")
     env["LDAP_DATA_DIR"] = str(ldap_base / "ldap_data")
 
+    data_root = Path(str(opencloud["data_dir"])).parent
+
     if to_bool(weboffice.get("enabled")):
         office_type = str(weboffice.get("type") or "euro_office").lower()
         if office_type == "euro_office":
@@ -212,6 +256,7 @@ def build_env_vars(config: dict, secrets: dict[str, str]) -> dict[str, str]:
             env["EURO_OFFICE_JWT_SECRET"] = secrets["EURO_OFFICE_JWT_SECRET"]
             env["EURO_OFFICE_DOCKER_IMAGE"] = ""
             env["EURO_OFFICE_DOCKER_TAG"] = "latest"
+            env["EURO_OFFICE_DATA_DIR"] = str(data_root / "euro-office")
         elif office_type == "collabora":
             env["COLLABORA_DOMAIN"] = str(weboffice["domain"])
             env["COLLABORA_SSL_ENABLE"] = "false"
@@ -285,6 +330,7 @@ def bootstrap_config(config: dict) -> None:
         config_dir,
         apps_dir,
         data_dir,
+        data_dir.parent / "euro-office",
         ldap_base / "ldap_certs",
         ldap_base / "ldap_data",
     ):
@@ -494,6 +540,7 @@ def apply(
 
     secret_values = create_or_update_secrets(rotate=rotate_secrets)
     bootstrap_config(config)
+    render_network_overlay(config)
     render_proxy_yaml(config)
     render_caddyfile(config)
 
