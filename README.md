@@ -36,6 +36,8 @@ bash apply.sh
 | `bash wizard.sh` | Interactive `deploy.yaml` creator + apply |
 | `bash start.sh` / `stop.sh` | Lifecycle without re-rendering |
 | `bash update.sh` | Pull submodule + images, re-apply, restart |
+| `bash backup-bundle.sh` | Portable `.tar.gz` for VPS migration |
+| `bash restore-bundle.sh` | Restore from portable bundle on a fresh VPS |
 | `bash backup.sh` | Run Borg backup now (when `backup.enabled`) |
 | `bash restore.sh` | List or restore from Borg archives |
 | `bash uninstall.sh` | Remove generated runtime files (keeps data) |
@@ -140,9 +142,39 @@ bash update.sh
 | Secrets | hardcoded | generated, mode `0600` |
 | Config | ephemeral | persistent paths outside submodule |
 
-## Backups (Borg)
+## Backups
 
-Enable in `deploy.yaml`:
+### Quick migration (recommended — ~5 minutes)
+
+**On the running server** (stop OpenCloud first for a clean snapshot):
+
+```bash
+bash stop.sh
+bash backup-bundle.sh
+# → opencloud-backup-cloud.example.com-20260729T120000Z.tar.gz
+```
+
+Copy that single file to your new VPS (scp, rsync, object storage, etc.).
+
+**On a fresh VPS:**
+
+```bash
+git clone <repo> opencloud-easy-deploy
+cd opencloud-easy-deploy
+bash restore-bundle.sh /path/to/opencloud-backup-*.tar.gz
+```
+
+That one command installs Docker, uv, restores all data/config/secrets, and runs `apply.sh`. Point DNS at the new server before visiting the URL.
+
+The bundle contains **passwords and keys** — treat it like a secrets backup.
+
+Optional output format: `bash backup-bundle.sh -o /tmp/backup.tar.zst` (requires `zstd`).
+
+---
+
+### Scheduled Borg backups (optional)
+
+For incremental daily backups on the same server, enable Borg in `deploy.yaml`:
 
 ```yaml
 backup:
@@ -194,7 +226,7 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now opencloud-backup.timer
 ```
 
-Store the Borg passphrase safely — without it, backups cannot be restored. For off-site safety, sync `/var/backups/opencloud` to another machine (rsync, restic, object storage, etc.).
+Store the Borg passphrase safely — without it, backups cannot be restored. For off-site safety, sync `/var/backups/opencloud` elsewhere, or use `backup-bundle.sh` periodically for a portable copy.
 
 ## Development
 

@@ -46,7 +46,8 @@ def load_yaml(path: Path) -> dict:
     return data
 
 
-def load_config(path: Path = DEPLOY_PATH) -> dict:
+def load_config(path: Path | None = None) -> dict:
+    path = path or DEPLOY_PATH
     if not path.exists():
         raise FileNotFoundError(f"Missing {path.name}. Run apply.sh first.")
     return load_yaml(path)
@@ -118,6 +119,19 @@ def backup_source_paths(config: dict) -> list[tuple[Path, str]]:
         mounts.append((data_root / "euro-office", f"{BACKUP_ROOT}/euro-office"))
 
     return mounts
+
+
+def payload_arcname(container_path: str) -> str:
+    """Map /backup-root/data → payload/data inside a portable bundle."""
+    prefix = f"{BACKUP_ROOT.rstrip('/')}/"
+    if not container_path.startswith(prefix):
+        raise ValueError(f"unexpected backup mount path: {container_path}")
+    return f"payload/{container_path[len(prefix):]}"
+
+
+def backup_path_entries(config: dict) -> list[tuple[Path, str]]:
+    """Host paths and their location inside a portable bundle archive."""
+    return [(host, payload_arcname(container)) for host, container in backup_source_paths(config)]
 
 
 def _compose_volumes(config: dict, *, read_only: bool) -> list[str]:
@@ -350,6 +364,7 @@ def print_backup_summary(config: dict) -> None:
     print(f"Repository: {settings['repository_path']}")
     print(f"Passphrase:   {SECRETS_PATH} (key: BORG_PASSPHRASE)")
     print("Run now:      bash backup.sh")
+    print("Portable:     bash backup-bundle.sh   # single .tar.gz for migration")
     print("List/restore: bash restore.sh --list")
     if settings["schedule_enabled"]:
         print("Schedule:     systemd timer files generated (install manually):")
