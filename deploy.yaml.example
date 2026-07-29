@@ -1,0 +1,42 @@
+# opencloud-easy-deploy — operator configuration
+# Copy to deploy.yaml and run: bash apply.sh
+
+opencloud:
+  domain: cloud.example.com
+  image: opencloudeu/opencloud-rolling
+  tag: "7.2.0"
+  admin_username: admin
+  data_dir: /var/lib/opencloud/data
+  config_dir: /var/lib/opencloud/config
+  apps_dir: /var/lib/opencloud/apps
+  language: en
+
+proxy:
+  type: caddy
+
+# auth.mode: builtin — built-in LDAP admin (simple VPS default)
+# auth.mode: oidc   — external IdP (Authentik, Keycloak, etc.)
+auth:
+  mode: builtin
+  oidc:
+    issuer_url: https://authentik.example.com/application/o/opencloud/
+    account_url: https://authentik.example.com/if/user/
+    domain: authentik.example.com
+    client_id: opencloud
+    client_scopes: "openid profile email offline_access"
+    role_claim: groups
+    role_mapping:
+      admin: opencloud-admin
+      user: opencloud-user
+      guest: opencloud-guest
+
+weboffice:
+  enabled: true
+  type: euro_office
+  domain: eurooffice.example.com
+
+modules:
+  search: false
+  antivirus: false
+  radicale: false
+  monitoring: false

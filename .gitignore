@@ -1,0 +1,25 @@
+# Generated runtime state
+.env
+.opencloud-easy-deploy/
+opencloud-compose/.env
+
+# Rendered configs
+caddy/Caddyfile
+
+# Python
+*.pyc
+__pycache__/
+.pycache/
+.venv/
+venv/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.idea/
+.vscode/
+
+# Operator config (optional — uncomment if deploy.yaml should stay local only)
+# deploy.yaml

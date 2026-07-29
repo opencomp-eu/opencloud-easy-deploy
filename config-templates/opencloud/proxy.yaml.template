@@ -1,0 +1,11 @@
+role_assignment:
+  driver: oidc
+  oidc_role_mapper:
+    role_claim: {{ROLE_CLAIM}}
+    role_mapping:
+      - role_name: admin
+        claim_value: {{ROLE_ADMIN}}
+      - role_name: user
+        claim_value: {{ROLE_USER}}
+      - role_name: guest
+        claim_value: {{ROLE_GUEST}}

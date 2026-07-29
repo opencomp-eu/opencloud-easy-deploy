@@ -1,0 +1,12 @@
+---
+services:
+  opencloud:
+    restart: unless-stopped
+    environment:
+      PROXY_OIDC_ACCESS_TOKEN_VERIFY_METHOD: "none"
+    volumes:
+      - ${OC_CONFIG_DIR}/proxy.yaml:/etc/opencloud/proxy.yaml
+
+networks:
+  opencloud-net:
+    name: opencloud-net
