@@ -11,6 +11,8 @@ import yaml
 from scripts.apply import (
     build_env_vars,
     derive_compose_files,
+    render_caddyfile,
+    render_euro_office_config,
     render_network_overlay,
     render_template,
     validate_config,
@@ -114,6 +116,7 @@ def test_build_env_vars_production_defaults():
     assert env["EURO_OFFICE_DOMAIN"] == "eurooffice.test.example"
     assert env["EURO_OFFICE_JWT_SECRET"] == "jwt-secret"
     assert env["EURO_OFFICE_DATA_DIR"] == "/var/lib/opencloud/euro-office"
+    assert env["EURO_OFFICE_CONFIG_DIR"] == "/var/lib/opencloud/euro-office-config"
     assert env["OCD_CADDYFILE"].endswith("/caddy/Caddyfile")
     assert "idm/external-idp.yml" not in env["COMPOSE_FILE"]
 
@@ -184,3 +187,40 @@ def test_render_network_overlay_sets_container_names(tmp_path, monkeypatch):
     assert data["services"]["euro-office"]["container_name"] == "euro-office"
     assert "eurooffice.test.example:host-gateway" in data["services"]["opencloud"]["extra_hosts"]
     assert "cloud.test.example:host-gateway" in data["services"]["euro-office"]["extra_hosts"]
+
+
+def test_render_euro_office_config_writes_local_json(tmp_path, monkeypatch):
+    from scripts import apply as apply_module
+
+    data_root = tmp_path / "data"
+    config = _base_config(
+        opencloud={
+            "domain": "cloud.test.example",
+            "data_dir": str(data_root / "data"),
+            "config_dir": str(data_root / "config"),
+            "apps_dir": str(data_root / "apps"),
+        }
+    )
+    render_euro_office_config(config, {"EURO_OFFICE_JWT_SECRET": "shared-jwt-secret"})
+    local_json = (data_root / "euro-office-config" / "local.json").read_text()
+    assert "shared-jwt-secret" in local_json
+    assert "CoAuthoring" in local_json
+
+
+def test_render_caddyfile_allows_opencloud_iframe(tmp_path, monkeypatch):
+    from scripts import apply as apply_module
+
+    caddyfile = tmp_path / "Caddyfile"
+    monkeypatch.setattr(apply_module, "CADDYFILE", caddyfile)
+    monkeypatch.setattr(
+        apply_module,
+        "CADDY_TEMPLATE",
+        tmp_path / "template",
+    )
+    apply_module.CADDY_TEMPLATE.write_text("{{OC_DOMAIN_BLOCK}}\n{{EURO_OFFICE_DOMAIN_BLOCK}}")
+
+    render_caddyfile(_base_config())
+    rendered = caddyfile.read_text()
+    assert "frame-ancestors 'self' https://cloud.test.example" in rendered
+    assert "header_down -X-Frame-Options" in rendered
+    assert rendered.count("X-Frame-Options SAMEORIGIN") == 1

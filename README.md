@@ -162,9 +162,11 @@ If OpenCloud logs show `WopiDiscovery: wopi app url failed with unexpected code 
 
 2. **Hairpin NAT / internal HTTPS calls** — OpenCloud fetches `https://<euro-office-domain>/hosting/discovery` from inside Docker. The generated overlay maps your public domains to `host-gateway` so those requests reach Caddy on the host without relying on NAT loopback.
 
-3. **JWT mismatch** — Euro Office must receive the same `JWT_SECRET` as OpenCloud's collaboration service. Re-run `bash apply.sh` to regenerate the overlay; Euro Office data is persisted under `<data-root>/euro-office`.
+3. **JWT mismatch** — Euro Office `JWT_SECRET` must match OpenCloud `COLLABORATION_WOPI_SECRET` (not `COLLABORATION_JWT_SECRET`, which breaks internal REVA tokens). Re-run `bash apply.sh`; it writes `euro-office-config/local.json` and mounts it into the container. If JWT was wrong on first boot, remove `<data-root>/euro-office` and re-apply.
 
-Euro Office first boot can take **3–5 minutes** (fonts, caches). Do not use `depends_on: service_healthy` with the upstream `/hosting/discovery` healthcheck — it often never passes in time. This project uses `/healthcheck` instead and waits after `docker compose up` before restarting OpenCloud.
+4. **X-Frame-Options / iframe blocked** — If the browser console shows Euro Office blocked by `X-Frame-Options: sameorigin`, re-run `bash apply.sh` so Caddy sets `Content-Security-Policy: frame-ancestors` for the Euro Office domain instead.
+
+Euro Office first boot can take **3–5 minutes** (fonts, caches). `apply.sh` waits for WOPI discovery before restarting OpenCloud.
 
 After updating, recreate the stack (a plain `stop.sh` / `start.sh` is not enough when networking overlays change):
 

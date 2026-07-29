@@ -101,6 +101,36 @@ else
 fi
 
 if [[ -n "$EURO_DOMAIN" ]]; then
+	section "Euro Office iframe headers (must allow ${OC_DOMAIN:-OpenCloud})"
+	headers="$(curl -k -sSI "https://${EURO_DOMAIN}/hosting/discovery" 2>/dev/null || true)"
+	echo "$headers" | grep -iE '^(x-frame-options|content-security-policy):' || echo "  (no frame headers)"
+	if echo "$headers" | grep -qi 'x-frame-options:.*sameorigin'; then
+		error "X-Frame-Options SAMEORIGIN blocks embedding in OpenCloud — re-run apply.sh"
+	elif echo "$headers" | grep -qi "frame-ancestors.*${OC_DOMAIN}"; then
+		success "CSP frame-ancestors allows OpenCloud"
+	else
+		warn "Missing frame-ancestors for OpenCloud — document editor iframe will be blocked"
+	fi
+fi
+
+if docker inspect opencloud &>/dev/null; then
+	section "OpenCloud collaboration secrets (env)"
+	docker exec opencloud env 2>/dev/null | grep -E '^COLLABORATION_(WOPI|JWT)_SECRET=' || warn "COLLABORATION_* secrets not set in container env"
+	if docker exec opencloud env 2>/dev/null | grep -q '^COLLABORATION_JWT_SECRET='; then
+		warn "COLLABORATION_JWT_SECRET overrides OC_JWT_SECRET and can break WOPI tokens — should be unset"
+	fi
+fi
+
+if docker inspect euro-office &>/dev/null; then
+	section "Euro Office JWT config"
+	if docker exec euro-office test -f /etc/euro-office/documentserver/local.json 2>/dev/null; then
+		success "local.json mounted at /etc/euro-office/documentserver/local.json"
+	else
+		warn "local.json not mounted — JWT may come from auto-generated data volume"
+	fi
+fi
+
+if [[ -n "$EURO_DOMAIN" ]]; then
 	section "Public HTTPS: Euro Office discovery"
 	code="$(http_code "https://${EURO_DOMAIN}/hosting/discovery")"
 	echo "  https://${EURO_DOMAIN}/hosting/discovery → HTTP ${code}"

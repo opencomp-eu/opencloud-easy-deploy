@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import secrets
 import shutil
@@ -259,6 +260,7 @@ def build_env_vars(config: dict, secrets: dict[str, str]) -> dict[str, str]:
             env["EURO_OFFICE_DOCKER_IMAGE"] = ""
             env["EURO_OFFICE_DOCKER_TAG"] = "latest"
             env["EURO_OFFICE_DATA_DIR"] = str(data_root / "euro-office")
+            env["EURO_OFFICE_CONFIG_DIR"] = str(data_root / "euro-office-config")
         elif office_type == "collabora":
             env["COLLABORA_DOMAIN"] = str(weboffice["domain"])
             env["COLLABORA_SSL_ENABLE"] = "false"
@@ -333,6 +335,7 @@ def bootstrap_config(config: dict) -> None:
         apps_dir,
         data_dir,
         data_dir.parent / "euro-office",
+        data_dir.parent / "euro-office-config",
         ldap_base / "ldap_certs",
         ldap_base / "ldap_data",
     ):
@@ -383,11 +386,45 @@ def render_proxy_yaml(config: dict) -> None:
         proxy_path.write_text(upstream_body)
 
 
+def render_euro_office_config(config: dict, secret_values: dict[str, str]) -> None:
+    """Write Euro Office local.json so JWT matches OpenCloud WOPI secret."""
+    weboffice = config.get("weboffice") or {}
+    if not to_bool(weboffice.get("enabled")):
+        return
+    if str(weboffice.get("type") or "euro_office") != "euro_office":
+        return
+
+    config_dir = Path(str(config["opencloud"]["data_dir"])).parent / "euro-office-config"
+    config_dir.mkdir(parents=True, exist_ok=True)
+
+    jwt_secret = secret_values["EURO_OFFICE_JWT_SECRET"]
+    local_json = {
+        "services": {
+            "CoAuthoring": {
+                "token": {
+                    "enable": {
+                        "request": {"inbox": True, "outbox": True},
+                        "browser": True,
+                    },
+                    "secret": {
+                        "inbox": {"string": jwt_secret},
+                        "outbox": {"string": jwt_secret},
+                        "browser": {"string": jwt_secret},
+                    },
+                }
+            }
+        }
+    }
+    target = config_dir / "local.json"
+    target.write_text(json.dumps(local_json, indent=2) + "\n")
+    os.chmod(target, 0o600)
+
+
 def render_caddyfile(config: dict) -> None:
     opencloud_domain = str(config["opencloud"]["domain"])
     weboffice = config.get("weboffice") or {}
 
-    security_headers = """
+    oc_security_headers = """
     header {
         X-Content-Type-Options nosniff
         X-Frame-Options SAMEORIGIN
@@ -398,7 +435,7 @@ def render_caddyfile(config: dict) -> None:
     log"""
 
     oc_block = f"""{opencloud_domain} {{
-    reverse_proxy opencloud:9200{security_headers}
+    reverse_proxy opencloud:9200{oc_security_headers}
 }}"""
 
     euro_block = ""
@@ -410,9 +447,21 @@ def render_caddyfile(config: dict) -> None:
             else "collabora:9980"
         )
         if office_domain:
+            # Euro Office/Collabora must be embeddable in OpenCloud iframes (cross-origin).
             euro_block = f"""
 {office_domain} {{
-    reverse_proxy {upstream}{security_headers}
+    reverse_proxy {upstream} {{
+        header_down -X-Frame-Options
+    }}
+    header {{
+        X-Content-Type-Options nosniff
+        Referrer-Policy strict-origin-when-cross-origin
+        -Server
+        -X-Frame-Options
+        Content-Security-Policy "frame-ancestors 'self' https://{opencloud_domain}"
+    }}
+    encode gzip
+    log
 }}"""
 
     rendered = render_template(
@@ -596,6 +645,7 @@ def apply(
     secret_values = create_or_update_secrets(rotate=rotate_secrets)
     bootstrap_config(config)
     render_network_overlay(config)
+    render_euro_office_config(config, secret_values)
     render_proxy_yaml(config)
     render_caddyfile(config)
 

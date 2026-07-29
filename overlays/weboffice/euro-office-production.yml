@@ -9,7 +9,9 @@ services:
       COLLABORATION_APP_ADDR: https://${EURO_OFFICE_DOMAIN}
       COLLABORATION_APP_INSECURE: "false"
       COLLABORATION_APP_ICON: https://${EURO_OFFICE_DOMAIN}/web-apps/apps/documenteditor/main/resources/img/favicon.ico
-      COLLABORATION_JWT_SECRET: ${EURO_OFFICE_JWT_SECRET}
+      COLLABORATION_APP_PROOF_DISABLE: "true"
+      # WOPI + Euro Office JWT — must match euro-office JWT_SECRET (NOT COLLABORATION_JWT_SECRET,
+      # which aliases OC_JWT_SECRET and breaks REVA token validation inside WOPI access tokens).
       COLLABORATION_WOPI_SECRET: ${EURO_OFFICE_JWT_SECRET}
 
   euro-office:
@@ -20,6 +22,7 @@ services:
       ALLOW_PRIVATE_IP_ADDRESS: "true"
     volumes:
       - ${EURO_OFFICE_DATA_DIR}:/var/www/euro-office/Data
+      - ${EURO_OFFICE_CONFIG_DIR}:/etc/euro-office/documentserver
     healthcheck:
       test:
         [
