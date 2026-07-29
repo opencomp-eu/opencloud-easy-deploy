@@ -9,6 +9,7 @@ import secrets
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -471,7 +472,39 @@ def run_compose(directory: Path, *args: str, env: dict[str, str] | None = None) 
     subprocess.run(cmd, cwd=directory, check=True, env=merged_env)
 
 
-def reconcile_runtime(env_path: Path) -> None:
+def wait_for_euro_office(timeout_seconds: int = 600) -> bool:
+    """Wait until Euro Office /healthcheck returns true (first boot can take several minutes)."""
+    if subprocess.run(["docker", "inspect", "euro-office"], capture_output=True).returncode != 0:
+        return False
+
+    deadline = time.time() + timeout_seconds
+    print("Waiting for Euro Office to become ready (first start may take up to 5 minutes)…")
+    while time.time() < deadline:
+        result = subprocess.run(
+            [
+                "docker",
+                "exec",
+                "euro-office",
+                "bash",
+                "-c",
+                "curl -sf http://127.0.0.1/healthcheck | grep -q true",
+            ],
+            capture_output=True,
+        )
+        if result.returncode == 0:
+            print("Euro Office is ready.")
+            return True
+        time.sleep(10)
+
+    print(
+        "Warning: Euro Office did not become ready in time. "
+        "OpenCloud may log WOPI errors until Euro Office finishes starting.",
+        file=sys.stderr,
+    )
+    return False
+
+
+def reconcile_runtime(env_path: Path, config: dict) -> None:
     env = {}
     if env_path.is_file():
         for line in env_path.read_text().splitlines():
@@ -492,6 +525,10 @@ def reconcile_runtime(env_path: Path) -> None:
 
     print("Starting OpenCloud stack…")
     run_compose(COMPOSE_DIR, "up", "-d", "--force-recreate", env=env)
+
+    weboffice = config.get("weboffice") or {}
+    if to_bool(weboffice.get("enabled")) and str(weboffice.get("type") or "") == "euro_office":
+        wait_for_euro_office()
 
     if subprocess.run(
         ["docker", "inspect", "opencloud"],
@@ -562,7 +599,7 @@ def apply(
     if no_reconcile_runtime:
         print("Skipping runtime reconcile (--no-reconcile-runtime).")
     else:
-        reconcile_runtime(env_path)
+        reconcile_runtime(env_path, config)
 
     print_summary(config)
 

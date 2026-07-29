@@ -1,9 +1,6 @@
 ---
 services:
   opencloud:
-    depends_on:
-      euro-office:
-        condition: service_healthy
     environment:
       # Server-side WOPI discovery over the Docker network (no Caddy/hairpin needed).
       COLLABORATION_APP_ADDR: http://euro-office
@@ -20,3 +17,15 @@ services:
       ALLOW_PRIVATE_IP_ADDRESS: "true"
     volumes:
       - ${EURO_OFFICE_DATA_DIR}:/var/www/euro-office/Data
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "bash",
+          "-c",
+          "curl -sf http://127.0.0.1/healthcheck | grep -q true",
+        ]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      start_period: 300s

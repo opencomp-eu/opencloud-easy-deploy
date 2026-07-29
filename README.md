@@ -164,6 +164,8 @@ If OpenCloud logs show `WopiDiscovery: wopi app url failed with unexpected code 
 
 3. **JWT mismatch** — Euro Office must receive the same `JWT_SECRET` as OpenCloud's collaboration service. Re-run `bash apply.sh` to regenerate the overlay; Euro Office data is persisted under `<data-root>/euro-office`.
 
+Euro Office first boot can take **3–5 minutes** (fonts, caches). Do not use `depends_on: service_healthy` with the upstream `/hosting/discovery` healthcheck — it often never passes in time. This project uses `/healthcheck` instead and waits after `docker compose up` before restarting OpenCloud.
+
 After updating, recreate the stack (a plain `stop.sh` / `start.sh` is not enough when networking overlays change):
 
 ```bash

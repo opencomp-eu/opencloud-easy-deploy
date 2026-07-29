@@ -48,6 +48,20 @@ http_code() {
 section "Containers"
 docker ps --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}' | grep -E 'opencloud|caddy|euro-office|NAMES' || true
 
+section "Euro Office readiness"
+if docker inspect euro-office &>/dev/null; then
+	status="$(docker inspect --format='{{.State.Health.Status}}' euro-office 2>/dev/null || echo unknown)"
+	echo "  health status: ${status}"
+	if docker exec euro-office bash -c 'curl -sf http://127.0.0.1/healthcheck | grep -q true' 2>/dev/null; then
+		success "/healthcheck returns true"
+	else
+		warn "/healthcheck not ready yet — first boot can take several minutes"
+		docker logs euro-office --since 10m 2>&1 | tail -15
+	fi
+else
+	warn "euro-office container not running"
+fi
+
 section "Docker DNS from Caddy → Euro Office (internal)"
 if docker inspect opencloud_caddy &>/dev/null; then
 	if docker exec opencloud_caddy wget -qO- http://euro-office/hosting/discovery 2>/dev/null | head -5; then
