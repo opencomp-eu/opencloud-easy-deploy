@@ -1,10 +1,13 @@
 ---
 services:
   opencloud:
+    depends_on:
+      euro-office:
+        condition: service_healthy
     environment:
-      # Server-side WOPI discovery over the Docker network (no Caddy/hairpin needed).
-      COLLABORATION_APP_ADDR: http://euro-office
-      COLLABORATION_APP_INSECURE: "true"
+      # Public URL via Caddy — correct Host header and discovery XML action URLs for browsers.
+      COLLABORATION_APP_ADDR: https://${EURO_OFFICE_DOMAIN}
+      COLLABORATION_APP_INSECURE: "false"
       COLLABORATION_APP_ICON: https://${EURO_OFFICE_DOMAIN}/web-apps/apps/documenteditor/main/resources/img/favicon.ico
       COLLABORATION_JWT_SECRET: ${EURO_OFFICE_JWT_SECRET}
       COLLABORATION_WOPI_SECRET: ${EURO_OFFICE_JWT_SECRET}
@@ -23,9 +26,9 @@ services:
           "CMD",
           "bash",
           "-c",
-          "curl -sf http://127.0.0.1/healthcheck | grep -q true",
+          "exec 3<>/dev/tcp/127.0.0.1/80 && printf 'GET /hosting/discovery HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n' >&3 && cat <&3 | head -1 | grep -q '200 OK'",
         ]
       interval: 15s
       timeout: 10s
-      retries: 20
+      retries: 40
       start_period: 300s

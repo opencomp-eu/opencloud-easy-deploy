@@ -48,18 +48,29 @@ http_code() {
 section "Containers"
 docker ps --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}' | grep -E 'opencloud|caddy|euro-office|NAMES' || true
 
-section "Euro Office readiness"
+section "Euro Office WOPI discovery (internal)"
 if docker inspect euro-office &>/dev/null; then
 	status="$(docker inspect --format='{{.State.Health.Status}}' euro-office 2>/dev/null || echo unknown)"
 	echo "  health status: ${status}"
-	if docker exec euro-office bash -c 'curl -sf http://127.0.0.1/healthcheck | grep -q true' 2>/dev/null; then
-		success "/healthcheck returns true"
+	if docker exec euro-office bash -c 'exec 3<>/dev/tcp/127.0.0.1/80 && printf "GET /hosting/discovery HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n" >&3 && cat <&3 | head -1 | grep -q "200 OK"'; then
+		success "WOPI /hosting/discovery returns 200 (Host: localhost)"
 	else
-		warn "/healthcheck not ready yet — first boot can take several minutes"
+		warn "WOPI discovery not ready — docservice may still be starting"
 		docker logs euro-office --since 10m 2>&1 | tail -15
 	fi
 else
 	warn "euro-office container not running"
+fi
+
+if [[ -n "$EURO_DOMAIN" ]] && docker inspect opencloud &>/dev/null; then
+	section "OpenCloud → Euro Office discovery (public URL)"
+	code="$(docker exec opencloud wget -q -S -O /dev/null "https://${EURO_DOMAIN}/hosting/discovery" 2>&1 | awk '/HTTP\// {print $2; exit}' || echo "000")"
+	echo "  https://${EURO_DOMAIN}/hosting/discovery → HTTP ${code}"
+	if [[ "$code" == "200" ]]; then
+		success "OpenCloud can fetch public WOPI discovery"
+	else
+		warn "OpenCloud cannot reach public WOPI discovery (check host-gateway + Caddy)"
+	fi
 fi
 
 section "Docker DNS from Caddy → backends (same compose network)"

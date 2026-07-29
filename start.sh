@@ -22,9 +22,9 @@ info "Starting OpenCloud stack…"
 (cd "${SCRIPT_DIR}/opencloud-compose" && "${DOCKER_COMPOSE[@]}" up -d)
 
 if docker inspect euro-office &>/dev/null; then
-	info "Waiting for Euro Office /healthcheck…"
+	info "Waiting for Euro Office WOPI discovery…"
 	for _ in $(seq 1 60); do
-		if docker exec euro-office bash -c 'curl -sf http://127.0.0.1/healthcheck | grep -q true' 2>/dev/null; then
+		if docker exec euro-office bash -c 'exec 3<>/dev/tcp/127.0.0.1/80 && printf "GET /hosting/discovery HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n" >&3 && cat <&3 | head -1 | grep -q "200 OK"' 2>/dev/null; then
 			break
 		fi
 		sleep 10

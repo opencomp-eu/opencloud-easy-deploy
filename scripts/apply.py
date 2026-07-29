@@ -473,36 +473,41 @@ def run_compose(directory: Path, *args: str, env: dict[str, str] | None = None) 
     subprocess.run(cmd, cwd=directory, check=True, env=merged_env)
 
 
+WOPI_DISCOVERY_PROBE = (
+    "exec 3<>/dev/tcp/127.0.0.1/80 && "
+    "printf 'GET /hosting/discovery HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n' >&3 && "
+    "cat <&3 | head -1 | grep -q '200 OK'"
+)
+
+
 def wait_for_euro_office(timeout_seconds: int = 600) -> bool:
-    """Wait until Euro Office /healthcheck returns true (first boot can take several minutes)."""
+    """Wait until Euro Office serves WOPI discovery (not just /healthcheck)."""
     if subprocess.run(["docker", "inspect", "euro-office"], capture_output=True).returncode != 0:
         return False
 
     deadline = time.time() + timeout_seconds
-    print("Waiting for Euro Office to become ready (first start may take up to 5 minutes)…")
+    print("Waiting for Euro Office WOPI discovery (first start may take several minutes)…")
     while time.time() < deadline:
         result = subprocess.run(
-            [
-                "docker",
-                "exec",
-                "euro-office",
-                "bash",
-                "-c",
-                "curl -sf http://127.0.0.1/healthcheck | grep -q true",
-            ],
+            ["docker", "exec", "euro-office", "bash", "-c", WOPI_DISCOVERY_PROBE],
             capture_output=True,
         )
         if result.returncode == 0:
-            print("Euro Office is ready.")
+            print("Euro Office WOPI discovery is ready.")
             return True
         time.sleep(10)
 
     print(
-        "Warning: Euro Office did not become ready in time. "
-        "OpenCloud may log WOPI errors until Euro Office finishes starting.",
+        "Warning: Euro Office WOPI discovery did not become ready in time.",
         file=sys.stderr,
     )
     return False
+
+
+def restart_opencloud_if_present() -> None:
+    if subprocess.run(["docker", "inspect", "opencloud"], capture_output=True).returncode == 0:
+        print("Restarting OpenCloud to refresh WOPI discovery…")
+        subprocess.run(["docker", "restart", "opencloud"], check=True)
 
 
 def stop_legacy_caddy() -> None:
@@ -533,18 +538,12 @@ def reconcile_runtime(env_path: Path, config: dict) -> None:
     run_compose(COMPOSE_DIR, "pull", env=env)
 
     print("Starting OpenCloud stack (includes Caddy)…")
-    run_compose(COMPOSE_DIR, "up", "-d", "--force-recreate", env=env)
+    run_compose(COMPOSE_DIR, "up", "-d", "--wait", "--force-recreate", env=env)
 
     weboffice = config.get("weboffice") or {}
     if to_bool(weboffice.get("enabled")) and str(weboffice.get("type") or "") == "euro_office":
-        wait_for_euro_office()
-
-    if subprocess.run(
-        ["docker", "inspect", "opencloud"],
-        capture_output=True,
-    ).returncode == 0:
-        print("Restarting OpenCloud to retry WOPI discovery…")
-        subprocess.run(["docker", "restart", "opencloud"], check=True)
+        if wait_for_euro_office():
+            restart_opencloud_if_present()
 
 
 def print_summary(config: dict) -> None:
