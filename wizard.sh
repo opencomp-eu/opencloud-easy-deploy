@@ -132,7 +132,7 @@ main() {
 		exit 0
 	fi
 
-	bash "${SCRIPT_DIR}/ensure_dependencies.sh"
+	bash "${SCRIPT_DIR}/ensure-dependencies.sh"
 	gather_config
 	bash "${SCRIPT_DIR}/apply.sh"
 }

@@ -11,10 +11,8 @@ This replaces the official test installer (`curl -L https://opencloud.eu/install
 ```bash
 git clone https://github.com/your-org/opencloud-easy-deploy.git
 cd opencloud-easy-deploy
-git submodule update --init --recursive
-uv sync --dev
-
-bash wizard.sh    # interactive: writes deploy.yaml and deploys
+bash ensure-dependencies.sh   # Docker, uv, submodule, Python deps
+bash wizard.sh                # interactive: writes deploy.yaml and deploys
 ```
 
 Or manually:
@@ -22,6 +20,7 @@ Or manually:
 ```bash
 cp deploy.yaml.example deploy.yaml
 # edit deploy.yaml — set your domain and paths
+bash ensure-dependencies.sh
 bash apply.sh
 ```
 
@@ -32,6 +31,7 @@ bash apply.sh
 | `deploy.yaml` | Operator-owned desired state (commit this) |
 | `.opencloud-easy-deploy/secrets.yaml` | Generated passwords (gitignored) |
 | `opencloud-compose/.env` | Generated Docker Compose env (gitignored) |
+| `bash ensure-dependencies.sh` | Install Docker, uv, submodule, Python deps |
 | `bash apply.sh` | Converge config and start/restart services |
 | `bash wizard.sh` | Interactive `deploy.yaml` creator + apply |
 | `bash start.sh` / `stop.sh` | Lifecycle without re-rendering |
