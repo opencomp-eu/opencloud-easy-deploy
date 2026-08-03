@@ -25,9 +25,11 @@ BACKUP_ENV = BACKUP_DIR / ".env"
 BACKUP_SCRIPTS = BACKUP_DIR / "scripts"
 BACKUP_RUN_SCRIPT = PROJECT_ROOT / "config-templates" / "backup" / "run-backup.sh"
 SYSTEMD_DIR = BACKUP_DIR / "systemd"
+BORG_SSH_KEY_MOUNT = "/root/.ssh/borg_key"
 
 BACKUP_ROOT = "/backup-root"
 BORG_IMAGE = "borgbackup/borgbackup:1.4.5"
+ARCHIVE_PAYLOAD_ROOT = "backup-root"
 
 
 def to_bool(value: Any) -> bool:
@@ -53,15 +55,36 @@ def load_config(path: Path | None = None) -> dict:
     return load_yaml(path)
 
 
+def repository_settings(config: dict) -> dict:
+    repository = (config.get("backup") or {}).get("repository") or {}
+    repo_type = str(repository.get("type") or "local").lower()
+    port_raw = repository.get("port")
+    port = int(port_raw) if port_raw not in (None, "") else 22
+    return {
+        "type": repo_type,
+        "path": str(repository.get("path") or "").strip(),
+        "host": str(repository.get("host") or "").strip(),
+        "user": str(repository.get("user") or "").strip(),
+        "port": port,
+        "ssh_key_path": str(repository.get("ssh_key_path") or "").strip(),
+        "host_key_check": to_bool(repository.get("host_key_check", True)),
+    }
+
+
 def backup_settings(config: dict) -> dict:
     backup = config.get("backup") or {}
-    repository = backup.get("repository") or {}
+    repository = repository_settings(config)
     schedule = backup.get("schedule") or {}
     retention = backup.get("retention") or {}
     return {
         "enabled": to_bool(backup.get("enabled")),
-        "repository_type": str(repository.get("type") or "local").lower(),
-        "repository_path": str(repository.get("path") or "").strip(),
+        "repository_type": repository["type"],
+        "repository_path": repository["path"],
+        "repository_host": repository["host"],
+        "repository_user": repository["user"],
+        "repository_port": repository["port"],
+        "ssh_key_path": repository["ssh_key_path"],
+        "host_key_check": repository["host_key_check"],
         "schedule_enabled": to_bool(schedule.get("enabled")),
         "schedule_calendar": str(schedule.get("calendar") or "*-*-* 03:00:00"),
         "schedule_persistent": to_bool(schedule.get("persistent", True)),
@@ -76,17 +99,59 @@ def backup_enabled(config: dict) -> bool:
     return backup_settings(config)["enabled"]
 
 
+def borg_repo_url(config: dict) -> str:
+    repo = repository_settings(config)
+    if repo["type"] == "local":
+        return "/repo"
+    if repo["type"] != "sftp":
+        raise ValueError(f"unsupported repository type: {repo['type']}")
+    remote_path = repo["path"].lstrip("/")
+    port_suffix = f":{repo['port']}" if repo["port"] != 22 else ""
+    return f"ssh://{repo['user']}@{repo['host']}{port_suffix}/{remote_path}"
+
+
+def borg_rsh(config: dict) -> str:
+    repo = repository_settings(config)
+    if repo["type"] != "sftp":
+        return ""
+    if not repo["ssh_key_path"]:
+        raise ValueError("backup.repository.ssh_key_path is required for sftp")
+    key_path = Path(repo["ssh_key_path"])
+    if not key_path.is_file():
+        raise FileNotFoundError(f"SSH key not found: {key_path}")
+    host_check = (
+        "-o StrictHostKeyChecking=accept-new"
+        if repo["host_key_check"]
+        else "-o StrictHostKeyChecking=no"
+    )
+    port_opt = f"-p {repo['port']}" if repo["port"] != 22 else ""
+    parts = ["ssh", "-i", BORG_SSH_KEY_MOUNT, host_check]
+    if port_opt:
+        parts.append(port_opt)
+    return " ".join(parts)
+
+
 def validate_backup_config(config: dict) -> None:
     settings = backup_settings(config)
     if not settings["enabled"]:
         return
-    if settings["repository_type"] != "local":
-        raise ValueError("backup.repository.type must be 'local' (only local repos are supported in v1)")
-    repo_path = settings["repository_path"]
-    if not repo_path:
+    repo_type = settings["repository_type"]
+    if repo_type not in {"local", "sftp"}:
+        raise ValueError("backup.repository.type must be 'local' or 'sftp'")
+    if not settings["repository_path"]:
         raise ValueError("backup.repository.path is required when backup is enabled")
-    if not repo_path.startswith("/"):
-        raise ValueError("backup.repository.path must be an absolute path")
+    if repo_type == "local":
+        if not settings["repository_path"].startswith("/"):
+            raise ValueError("backup.repository.path must be an absolute path for local repos")
+    else:
+        if not settings["repository_host"]:
+            raise ValueError("backup.repository.host is required for sftp")
+        if not settings["repository_user"]:
+            raise ValueError("backup.repository.user is required for sftp")
+        if not settings["ssh_key_path"]:
+            raise ValueError("backup.repository.ssh_key_path is required for sftp")
+        if not Path(settings["ssh_key_path"]).is_file():
+            raise ValueError(f"backup.repository.ssh_key_path not found: {settings['ssh_key_path']}")
     for key in ("keep_daily", "keep_weekly", "keep_monthly", "keep_yearly"):
         if settings[key] < 0:
             raise ValueError(f"backup.retention.{key} must be >= 0")
@@ -121,8 +186,15 @@ def backup_source_paths(config: dict) -> list[tuple[Path, str]]:
     return mounts
 
 
+def secrets_bootstrap_paths() -> list[tuple[Path, str]]:
+    """Minimal mounts to restore deploy.yaml and secrets.yaml from Borg."""
+    return [
+        (STATE_DIR / "secrets.yaml", f"{BACKUP_ROOT}/secrets/secrets.yaml"),
+        (DEPLOY_PATH.resolve(), f"{BACKUP_ROOT}/secrets/deploy.yaml"),
+    ]
+
+
 def payload_arcname(container_path: str) -> str:
-    """Map /backup-root/data → payload/data inside a portable bundle."""
     prefix = f"{BACKUP_ROOT.rstrip('/')}/"
     if not container_path.startswith(prefix):
         raise ValueError(f"unexpected backup mount path: {container_path}")
@@ -130,43 +202,60 @@ def payload_arcname(container_path: str) -> str:
 
 
 def backup_path_entries(config: dict) -> list[tuple[Path, str]]:
-    """Host paths and their location inside a portable bundle archive."""
     return [(host, payload_arcname(container)) for host, container in backup_source_paths(config)]
 
 
-def _compose_volumes(config: dict, *, read_only: bool) -> list[str]:
-    settings = backup_settings(config)
+def _compose_volumes(
+    config: dict,
+    *,
+    read_only: bool,
+    path_mounts: list[tuple[Path, str]] | None = None,
+) -> list[str]:
+    repo = repository_settings(config)
     suffix = ":ro" if read_only else ""
-    volumes = [f"{settings['repository_path']}:/repo"]
-    for host_path, container_path in backup_source_paths(config):
+    volumes: list[str] = []
+    if repo["type"] == "local":
+        volumes.append(f"{repo['path']}:/repo")
+    else:
+        volumes.append(f"{repo['ssh_key_path']}:{BORG_SSH_KEY_MOUNT}:ro")
+    for host_path, container_path in path_mounts or backup_source_paths(config):
         volumes.append(f"{host_path}:{container_path}{suffix}")
     volumes.append(f"{BACKUP_SCRIPTS.resolve()}:/scripts:ro")
     return volumes
 
 
-def _write_compose(path: Path, config: dict, *, read_only: bool) -> None:
-    settings = backup_settings(config)
-    compose = {
-        "services": {
-            "borg": {
-                "image": BORG_IMAGE,
-                "container_name": "opencloud_borg",
-                "network_mode": "none",
-                "environment": {
-                    "BORG_PASSPHRASE": "${BORG_PASSPHRASE}",
-                    "BORG_REPO": "/repo",
-                    "BORG_ARCHIVE_PREFIX": "${BORG_ARCHIVE_PREFIX}",
-                    "KEEP_DAILY": "${KEEP_DAILY}",
-                    "KEEP_WEEKLY": "${KEEP_WEEKLY}",
-                    "KEEP_MONTHLY": "${KEEP_MONTHLY}",
-                    "KEEP_YEARLY": "${KEEP_YEARLY}",
-                },
-                "volumes": _compose_volumes(config, read_only=read_only),
-                "working_dir": "/",
-                "entrypoint": ["/bin/sh"],
-            }
-        }
+def _write_compose(
+    path: Path,
+    config: dict,
+    *,
+    read_only: bool,
+    path_mounts: list[tuple[Path, str]] | None = None,
+) -> None:
+    repo = repository_settings(config)
+    environment = {
+        "BORG_PASSPHRASE": "${BORG_PASSPHRASE}",
+        "BORG_REPO": "${BORG_REPO}",
+        "BORG_ARCHIVE_PREFIX": "${BORG_ARCHIVE_PREFIX}",
+        "KEEP_DAILY": "${KEEP_DAILY}",
+        "KEEP_WEEKLY": "${KEEP_WEEKLY}",
+        "KEEP_MONTHLY": "${KEEP_MONTHLY}",
+        "KEEP_YEARLY": "${KEEP_YEARLY}",
     }
+    if repo["type"] == "sftp":
+        environment["BORG_RSH"] = "${BORG_RSH}"
+
+    service: dict[str, Any] = {
+        "image": BORG_IMAGE,
+        "container_name": "opencloud_borg",
+        "environment": environment,
+        "volumes": _compose_volumes(config, read_only=read_only, path_mounts=path_mounts),
+        "working_dir": "/",
+        "entrypoint": ["/bin/sh"],
+    }
+    if repo["type"] == "local":
+        service["network_mode"] = "none"
+
+    compose = {"services": {"borg": service}}
     path.write_text(yaml.safe_dump(compose, sort_keys=False))
 
 
@@ -178,16 +267,38 @@ def write_backup_env(config: dict, secrets: dict[str, str]) -> None:
         "# Generated by opencloud-easy-deploy — do not edit by hand.",
         "",
         f"BORG_PASSPHRASE={secrets['BORG_PASSPHRASE']}",
-        f"BORG_REPO_PATH={settings['repository_path']}",
+        f"BORG_REPO={borg_repo_url(config)}",
         f"BORG_ARCHIVE_PREFIX=opencloud-{domain}",
         f"KEEP_DAILY={settings['keep_daily']}",
         f"KEEP_WEEKLY={settings['keep_weekly']}",
         f"KEEP_MONTHLY={settings['keep_monthly']}",
         f"KEEP_YEARLY={settings['keep_yearly']}",
     ]
+    if settings["repository_type"] == "local":
+        lines.append(f"BORG_REPO_PATH={settings['repository_path']}")
+    rsh = borg_rsh(config)
+    if rsh:
+        lines.append(f"BORG_RSH={shlex.quote(rsh)}")
     BACKUP_ENV.parent.mkdir(parents=True, exist_ok=True)
     BACKUP_ENV.write_text("\n".join(lines) + "\n")
     os.chmod(BACKUP_ENV, 0o600)
+
+
+def ensure_secrets_paths_exist() -> None:
+    for host_path, _ in secrets_bootstrap_paths():
+        host_path.parent.mkdir(parents=True, exist_ok=True)
+        if host_path.suffix == ".yaml" and not host_path.exists():
+            host_path.touch()
+
+
+def ensure_backup_paths_exist(config: dict) -> None:
+    for host_path, _ in backup_source_paths(config):
+        if host_path.suffix == ".yaml":
+            host_path.parent.mkdir(parents=True, exist_ok=True)
+            if not host_path.exists():
+                host_path.touch()
+        else:
+            host_path.mkdir(parents=True, exist_ok=True)
 
 
 def render_backup_compose(config: dict) -> None:
@@ -229,15 +340,119 @@ WantedBy=timers.target
     (SYSTEMD_DIR / "opencloud-backup.timer").write_text(timer)
 
 
+def bootstrap_secrets_only_restore(config: dict, secrets: dict[str, str]) -> None:
+    """Phase 1: connect to Borg; mount only paths needed for deploy.yaml + secrets.yaml."""
+    repo = repository_settings(config)
+    if repo["type"] == "sftp":
+        if not Path(repo["ssh_key_path"]).is_file():
+            raise FileNotFoundError(f"SSH key not found: {repo['ssh_key_path']}")
+    elif repo["type"] == "local" and not Path(repo["path"]).is_dir():
+        raise FileNotFoundError(f"Local Borg repository not found: {repo['path']}")
+
+    ensure_secrets_paths_exist()
+    BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+    BACKUP_SCRIPTS.mkdir(parents=True, exist_ok=True)
+    _write_compose(
+        BACKUP_RESTORE_COMPOSE,
+        config,
+        read_only=False,
+        path_mounts=secrets_bootstrap_paths(),
+    )
+    write_backup_env(config, secrets)
+
+
 def bootstrap_backup(config: dict, secrets: dict[str, str]) -> None:
     if not backup_enabled(config):
         return
-    repo_path = Path(backup_settings(config)["repository_path"])
-    repo_path.mkdir(parents=True, exist_ok=True)
-    os.chmod(repo_path, 0o700)
+    repo = repository_settings(config)
+    if repo["type"] == "local":
+        repo_path = Path(repo["path"])
+        repo_path.mkdir(parents=True, exist_ok=True)
+        os.chmod(repo_path, 0o700)
+    ensure_backup_paths_exist(config)
     render_backup_compose(config)
     write_backup_env(config, secrets)
     render_systemd_units(config)
+
+
+def bootstrap_config_from_env() -> dict | None:
+    """Build minimal config from OCD_BACKUP_* env vars (fresh VPS, before deploy.yaml exists)."""
+    local_path = os.environ.get("OCD_BACKUP_LOCAL_PATH", "").strip()
+    if local_path:
+        return {
+            "opencloud": {"domain": "bootstrap.local"},
+            "backup": {
+                "enabled": True,
+                "repository": {"type": "local", "path": local_path},
+            },
+        }
+
+    host = os.environ.get("OCD_BACKUP_SFTP_HOST", "").strip()
+    user = os.environ.get("OCD_BACKUP_SFTP_USER", "").strip()
+    path = os.environ.get("OCD_BACKUP_SFTP_PATH", "").strip()
+    ssh_key = os.environ.get("OCD_BACKUP_SSH_KEY", "").strip()
+    if not all((host, user, path, ssh_key)):
+        return None
+    port = int(os.environ.get("OCD_BACKUP_SFTP_PORT", "22") or "22")
+    return {
+        "opencloud": {"domain": "bootstrap.local"},
+        "backup": {
+            "enabled": True,
+            "repository": {
+                "type": "sftp",
+                "host": host,
+                "user": user,
+                "path": path,
+                "port": port,
+                "ssh_key_path": ssh_key,
+                "host_key_check": to_bool(os.environ.get("OCD_BACKUP_HOST_KEY_CHECK", "true")),
+            },
+        },
+    }
+
+
+def resolve_connection_config() -> dict:
+    """Repository connection: deploy.yaml on disk, or OCD_BACKUP_* env vars."""
+    if DEPLOY_PATH.is_file():
+        config = load_yaml(DEPLOY_PATH)
+        if backup_enabled(config):
+            return config
+    env_config = bootstrap_config_from_env()
+    if env_config:
+        return env_config
+    raise FileNotFoundError(
+        "Set OCD_BACKUP_SFTP_* (or OCD_BACKUP_LOCAL_PATH), or place deploy.yaml here first"
+    )
+
+
+def _fresh_restore_needs_secrets_phase() -> bool:
+    if not DEPLOY_PATH.is_file():
+        return True
+    try:
+        return not backup_enabled(load_yaml(DEPLOY_PATH))
+    except ValueError:
+        return True
+
+
+def _run_borg_extract(archive_name: str, paths: list[str]) -> subprocess.CompletedProcess[str]:
+    extract_cmd = (
+        f"borg extract --verbose {_repo_shell_var()}::{shlex.quote(archive_name)} "
+        + " ".join(shlex.quote(path) for path in paths)
+    )
+    return compose_run(extract_cmd, restore=True, check=False)
+
+
+def _prepare_passphrase_secrets(passphrase: str) -> dict[str, str]:
+    secrets: dict[str, str] = {"BORG_PASSPHRASE": passphrase}
+    if SECRETS_PATH.is_file():
+        existing = load_yaml(SECRETS_PATH)
+        existing.update(secrets)
+        secrets = existing
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    with SECRETS_PATH.open("w") as handle:
+        yaml.safe_dump(secrets, handle, default_flow_style=False)
+    os.chmod(SECRETS_PATH, 0o600)
+    return secrets
 
 
 def docker_compose_cmd() -> list[str]:
@@ -279,6 +494,38 @@ def compose_run(
     return subprocess.run(cmd, cwd=PROJECT_ROOT, check=check, text=True)
 
 
+def _repo_shell_var() -> str:
+    return "${BORG_REPO}"
+
+
+def _list_archives() -> list[str]:
+    result = compose_run(f"borg list --short {_repo_shell_var()}", check=False)
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr or result.stdout or "borg list failed")
+    return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+
+
+def _resolve_archive_name(archive: str | None, latest: bool) -> str | None:
+    archives = _list_archives()
+    if not archives:
+        print("No archives found in repository.", file=sys.stderr)
+        return None
+    if latest:
+        return archives[-1]
+    if archive:
+        if archive not in archives:
+            print(f"Archive not found: {archive}", file=sys.stderr)
+            print("Available archives:", file=sys.stderr)
+            for name in archives:
+                print(f"  {name}", file=sys.stderr)
+            return None
+        return archive
+    print("Available archives:")
+    for name in archives:
+        print(f"  {name}")
+    return None
+
+
 def cmd_run_backup() -> int:
     config = load_config()
     secrets = load_yaml(SECRETS_PATH)
@@ -288,7 +535,13 @@ def cmd_run_backup() -> int:
 
 
 def cmd_list_archives() -> int:
-    result = compose_run("borg list --short /repo", check=False)
+    if not BACKUP_ENV.is_file():
+        config = resolve_connection_config()
+        passphrase = os.environ.get("BORG_PASSPHRASE", "").strip()
+        if not passphrase:
+            raise ValueError("Set BORG_PASSPHRASE to access the repository")
+        bootstrap_secrets_only_restore(config, {"BORG_PASSPHRASE": passphrase})
+    result = compose_run(f"borg list --short {_repo_shell_var()}", check=False)
     if result.stdout:
         print(result.stdout, end="")
     if result.stderr:
@@ -297,36 +550,17 @@ def cmd_list_archives() -> int:
 
 
 def cmd_restore(*, archive: str | None, latest: bool, dry_run: bool, paths: list[str]) -> int:
-    list_result = compose_run("borg list --short /repo", check=False)
-    if list_result.returncode != 0:
-        print(list_result.stderr or list_result.stdout, file=sys.stderr)
-        return list_result.returncode
+    if not BACKUP_ENV.is_file():
+        bootstrap_backup(load_config(), load_yaml(SECRETS_PATH))
 
-    archives = [line.strip() for line in list_result.stdout.splitlines() if line.strip()]
-    if not archives:
-        print("No archives found in repository.", file=sys.stderr)
-        return 1
+    archive_name = _resolve_archive_name(archive, latest)
+    if archive_name is None:
+        return 1 if archive or latest else 0
 
-    if latest:
-        archive_name = archives[-1]
-    elif archive:
-        archive_name = archive
-        if archive_name not in archives:
-            print(f"Archive not found: {archive_name}", file=sys.stderr)
-            print("Available archives:", file=sys.stderr)
-            for name in archives:
-                print(f"  {name}", file=sys.stderr)
-            return 1
-    else:
-        print("Available archives:")
-        for name in archives:
-            print(f"  {name}")
-        return 0
-
-    restore_paths = paths or ["backup-root"]
+    restore_paths = paths or [ARCHIVE_PAYLOAD_ROOT]
 
     if dry_run:
-        cmd = "borg list /repo::" + shlex.quote(archive_name)
+        cmd = f"borg list {_repo_shell_var()}::{shlex.quote(archive_name)}"
         if paths:
             cmd += " " + " ".join(shlex.quote(path) for path in restore_paths)
         print(f"Dry run — contents of {archive_name}:")
@@ -338,7 +572,7 @@ def cmd_restore(*, archive: str | None, latest: bool, dry_run: bool, paths: list
     print(f"Restoring archive {archive_name}…")
     print("Ensure OpenCloud is stopped: bash stop.sh")
     extract_cmd = (
-        f"borg extract --verbose /repo::{shlex.quote(archive_name)} "
+        f"borg extract --verbose {_repo_shell_var()}::{shlex.quote(archive_name)} "
         + " ".join(shlex.quote(path) for path in restore_paths)
     )
     result = compose_run(extract_cmd, restore=True, check=False)
@@ -351,8 +585,65 @@ def cmd_restore(*, archive: str | None, latest: bool, dry_run: bool, paths: list
         print("Restore complete. Next steps:")
         print("  1. Verify restored files under your data/config paths")
         print("  2. bash apply.sh")
-        print("  3. bash start.sh")
     return result.returncode
+
+
+def cmd_fresh_restore(*, archive: str | None, latest: bool) -> int:
+    passphrase = os.environ.get("BORG_PASSPHRASE", "").strip()
+    if not passphrase:
+        raise ValueError("Set BORG_PASSPHRASE to restore from Borg (keep it in your password manager)")
+
+    secrets = _prepare_passphrase_secrets(passphrase)
+    needs_config_from_archive = _fresh_restore_needs_secrets_phase()
+
+    if needs_config_from_archive:
+        conn = bootstrap_config_from_env()
+        if not conn:
+            raise ValueError(
+                "On a fresh VPS set OCD_BACKUP_SFTP_* or OCD_BACKUP_LOCAL_PATH "
+                "so we can reach your Borg repository"
+            )
+        validate_backup_config({**conn, "backup": {**conn["backup"], "enabled": True}})
+        bootstrap_secrets_only_restore(conn, secrets)
+    elif not BACKUP_ENV.is_file():
+        bootstrap_backup(load_config(), secrets)
+
+    archive_name = _resolve_archive_name(archive, latest=latest or not archive)
+    if archive_name is None:
+        return 1
+
+    if needs_config_from_archive:
+        print(f"Fetching deploy.yaml from archive {archive_name}…")
+        result = _run_borg_extract(archive_name, [f"{ARCHIVE_PAYLOAD_ROOT}/secrets"])
+        if result.stdout:
+            print(result.stdout, end="")
+        if result.stderr:
+            print(result.stderr, end="", file=sys.stderr)
+        if result.returncode != 0:
+            return result.returncode
+        if not DEPLOY_PATH.is_file():
+            raise RuntimeError("Archive did not contain backup-root/secrets/deploy.yaml")
+
+    config = load_config()
+    validate_backup_config(config)
+    secrets = load_yaml(SECRETS_PATH) if SECRETS_PATH.is_file() else secrets
+    secrets["BORG_PASSPHRASE"] = passphrase
+
+    print(f"Restoring archive {archive_name}…")
+    bootstrap_backup(config, secrets)
+    result = _run_borg_extract(archive_name, [ARCHIVE_PAYLOAD_ROOT])
+    if result.stdout:
+        print(result.stdout, end="")
+    if result.stderr:
+        print(result.stderr, end="", file=sys.stderr)
+    if result.returncode != 0:
+        return result.returncode
+
+    os.chmod(SECRETS_PATH, 0o600)
+    print()
+    print("Borg restore complete. deploy.yaml and secrets.yaml came from the archive.")
+    print("Next: bash apply.sh (restore-borg.sh runs this automatically)")
+    return 0
 
 
 def print_backup_summary(config: dict) -> None:
@@ -361,18 +652,21 @@ def print_backup_summary(config: dict) -> None:
     settings = backup_settings(config)
     print()
     print("=== Backup (Borg) ===")
-    print(f"Repository: {settings['repository_path']}")
-    print(f"Passphrase:   {SECRETS_PATH} (key: BORG_PASSPHRASE)")
+    if settings["repository_type"] == "sftp":
+        print(
+            f"Repository: sftp://{settings['repository_user']}@{settings['repository_host']}{settings['repository_path']}"
+        )
+    else:
+        print(f"Repository: {settings['repository_path']}")
+    print(f"Passphrase:   {SECRETS_PATH} (key: BORG_PASSPHRASE) — keep safe off-site")
     print("Run now:      bash backup.sh")
-    print("Portable:     bash backup-bundle.sh   # single .tar.gz for migration")
+    print("Portable:     bash backup-bundle.sh")
+    print("Fresh VPS:    bash restore-borg.sh  (passphrase + SFTP or local repo path)")
     print("List/restore: bash restore.sh --list")
     if settings["schedule_enabled"]:
-        print("Schedule:     systemd timer files generated (install manually):")
-        print(f"  sudo cp {SYSTEMD_DIR}/opencloud-backup.* /etc/systemd/system/")
-        print("  sudo systemctl daemon-reload")
-        print("  sudo systemctl enable --now opencloud-backup.timer")
+        print("Schedule:     systemd timer — see .opencloud-easy-deploy/backup/systemd/")
     else:
-        print("Schedule:     disabled — run bash backup.sh manually or set backup.schedule.enabled")
+        print("Schedule:     disabled")
 
 
 def main() -> None:
@@ -393,6 +687,10 @@ def main() -> None:
         help="Limit restore to a path inside the archive (repeatable)",
     )
 
+    fresh_parser = sub.add_parser("fresh-restore", help="Restore on empty host from Borg remote/local")
+    fresh_parser.add_argument("--archive", help="Archive name (default: latest)")
+    fresh_parser.add_argument("--latest", action="store_true", help="Restore newest archive")
+
     args = parser.parse_args()
 
     try:
@@ -409,6 +707,8 @@ def main() -> None:
                     paths=args.paths or [],
                 )
             )
+        if args.command == "fresh-restore":
+            sys.exit(cmd_fresh_restore(archive=args.archive, latest=args.latest))
     except (FileNotFoundError, RuntimeError, ValueError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         sys.exit(1)

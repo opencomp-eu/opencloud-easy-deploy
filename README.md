@@ -38,6 +38,7 @@ bash apply.sh
 | `bash update.sh` | Pull submodule + images, re-apply, restart |
 | `bash backup-bundle.sh` | Portable `.tar.gz` for VPS migration |
 | `bash restore-bundle.sh` | Restore from portable bundle on a fresh VPS |
+| `bash restore-borg.sh` | Restore from Borg (local or SFTP) on a fresh VPS |
 | `bash backup.sh` | Run Borg backup now (when `backup.enabled`) |
 | `bash restore.sh` | List or restore from Borg archives |
 | `bash uninstall.sh` | Remove generated runtime files (keeps data) |
@@ -51,7 +52,7 @@ See [`deploy.yaml.example`](deploy.yaml.example). Key sections:
 - **auth** — `builtin` (simple admin login) or `oidc` (external IdP)
 - **weboffice** — `euro_office` or `collabora` (mutually exclusive with each other)
 - **modules** — optional search, antivirus, radicale, monitoring
-- **backup** — optional Borg backups to a local repository
+- **backup** — optional Borg backups to a local directory or SFTP repository
 
 ## Authentication modes
 
@@ -144,6 +145,13 @@ bash update.sh
 
 ## Backups
 
+Two ways to recover on a fresh VPS:
+
+| Method | You provide | Everything else |
+|--------|-------------|-----------------|
+| **Portable bundle** | `opencloud-backup-*.tar.gz` | `bash restore-bundle.sh` |
+| **Borg (local or SFTP)** | Passphrase + how to reach the repo (SFTP host/user/path + SSH key, or local repo path) | `deploy.yaml` and data come from the archive |
+
 ### Quick migration (recommended — ~5 minutes)
 
 **On the running server** (stop OpenCloud first for a clean snapshot):
@@ -174,7 +182,9 @@ Optional output format: `bash backup-bundle.sh -o /tmp/backup.tar.zst` (requires
 
 ### Scheduled Borg backups (optional)
 
-For incremental daily backups on the same server, enable Borg in `deploy.yaml`:
+For incremental backups on the same server or off-site via SFTP, enable Borg in `deploy.yaml`:
+
+**Local repository (simple, same VPS):**
 
 ```yaml
 backup:
@@ -193,7 +203,31 @@ backup:
     keep_yearly: 0
 ```
 
-Then run `bash apply.sh` to generate backup config and a `BORG_PASSPHRASE` in `.opencloud-easy-deploy/secrets.yaml`.
+**SFTP off-site (recommended for crash recovery):**
+
+```yaml
+backup:
+  enabled: true
+  repository:
+    type: sftp
+    host: backup.example.com
+    user: borg
+    path: /repos/opencloud
+    port: 22
+    ssh_key_path: /root/.ssh/borg_backup
+    host_key_check: true
+  schedule:
+    enabled: true
+    calendar: "*-*-* 03:00:00"
+  retention:
+    keep_daily: 7
+    keep_weekly: 4
+    keep_monthly: 6
+```
+
+Each backup archive includes OpenCloud data, `deploy.yaml`, and `secrets.yaml` — restore pulls configuration from the archive, not a separate bootstrap file.
+
+Then run `bash apply.sh` to generate backup config and a `BORG_PASSPHRASE` in `.opencloud-easy-deploy/secrets.yaml`. Store the passphrase and SSH private key safely off-site.
 
 **Run a backup now:**
 
@@ -207,7 +241,7 @@ bash backup.sh
 bash restore.sh --list
 ```
 
-**Restore on this host or a fresh VPS:**
+**Restore on this host:**
 
 ```bash
 bash stop.sh
@@ -215,6 +249,23 @@ bash restore.sh --latest
 bash apply.sh
 bash start.sh
 ```
+
+**Restore on a fresh VPS from Borg:**
+
+```bash
+git clone <repo> opencloud-easy-deploy && cd opencloud-easy-deploy
+export BORG_PASSPHRASE='your-passphrase'
+# SFTP:
+export OCD_BACKUP_SFTP_HOST=backup.example.com
+export OCD_BACKUP_SFTP_USER=borg
+export OCD_BACKUP_SFTP_PATH=/repos/opencloud
+export OCD_BACKUP_SSH_KEY=/root/.ssh/borg_backup
+# Or local repo path:
+# export OCD_BACKUP_LOCAL_PATH=/var/backups/opencloud
+bash restore-borg.sh
+```
+
+`restore-borg.sh` fetches `deploy.yaml` from the archive first, then restores all data using the paths defined there.
 
 Backups include OpenCloud data/config/apps, LDAP state (if OIDC), Euro Office data, `deploy.yaml`, and `secrets.yaml`.
 
@@ -226,7 +277,7 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now opencloud-backup.timer
 ```
 
-Store the Borg passphrase safely — without it, backups cannot be restored. For off-site safety, sync `/var/backups/opencloud` elsewhere, or use `backup-bundle.sh` periodically for a portable copy.
+Store the Borg passphrase and SSH key safely off-site — without them, backups cannot be restored. For local repos, sync `/var/backups/opencloud` elsewhere or use `backup-bundle.sh` periodically. For SFTP, the remote repository *is* your off-site copy.
 
 ## Development
 
