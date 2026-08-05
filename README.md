@@ -11,10 +11,8 @@ This replaces the official test installer (`curl -L https://opencloud.eu/install
 ```bash
 git clone https://github.com/your-org/opencloud-easy-deploy.git
 cd opencloud-easy-deploy
-git submodule update --init --recursive
-uv sync --dev
-
-bash wizard.sh    # interactive: writes deploy.yaml and deploys
+bash ensure-dependencies.sh   # Docker, uv, submodule, Python deps
+bash wizard.sh                # interactive: writes deploy.yaml and deploys
 ```
 
 Or manually:
@@ -22,6 +20,7 @@ Or manually:
 ```bash
 cp deploy.yaml.example deploy.yaml
 # edit deploy.yaml — set your domain and paths
+bash ensure-dependencies.sh
 bash apply.sh
 ```
 
@@ -32,10 +31,16 @@ bash apply.sh
 | `deploy.yaml` | Operator-owned desired state (commit this) |
 | `.opencloud-easy-deploy/secrets.yaml` | Generated passwords (gitignored) |
 | `opencloud-compose/.env` | Generated Docker Compose env (gitignored) |
+| `bash ensure-dependencies.sh` | Install Docker, uv, submodule, Python deps |
 | `bash apply.sh` | Converge config and start/restart services |
 | `bash wizard.sh` | Interactive `deploy.yaml` creator + apply |
 | `bash start.sh` / `stop.sh` | Lifecycle without re-rendering |
 | `bash update.sh` | Pull submodule + images, re-apply, restart |
+| `bash backup-bundle.sh` | Portable `.tar.gz` for VPS migration |
+| `bash restore-bundle.sh` | Restore from portable bundle on a fresh VPS |
+| `bash restore-borg.sh` | Restore from Borg (local or SFTP) on a fresh VPS |
+| `bash backup.sh` | Run Borg backup now (when `backup.enabled`) |
+| `bash restore.sh` | List or restore from Borg archives |
 | `bash uninstall.sh` | Remove generated runtime files (keeps data) |
 
 ## deploy.yaml overview
@@ -47,6 +52,7 @@ See [`deploy.yaml.example`](deploy.yaml.example). Key sections:
 - **auth** — `builtin` (simple admin login) or `oidc` (external IdP)
 - **weboffice** — `euro_office` or `collabora` (mutually exclusive with each other)
 - **modules** — optional search, antivirus, radicale, monitoring
+- **backup** — optional Borg backups to a local directory or SFTP repository
 
 ## Authentication modes
 
@@ -136,6 +142,142 @@ bash update.sh
 | `DEMO_USERS` | enabled | `false` |
 | Secrets | hardcoded | generated, mode `0600` |
 | Config | ephemeral | persistent paths outside submodule |
+
+## Backups
+
+Two ways to recover on a fresh VPS:
+
+| Method | You provide | Everything else |
+|--------|-------------|-----------------|
+| **Portable bundle** | `opencloud-backup-*.tar.gz` | `bash restore-bundle.sh` |
+| **Borg (local or SFTP)** | Passphrase + how to reach the repo (SFTP host/user/path + SSH key, or local repo path) | `deploy.yaml` and data come from the archive |
+
+### Quick migration (recommended — ~5 minutes)
+
+**On the running server** (stop OpenCloud first for a clean snapshot):
+
+```bash
+bash stop.sh
+bash backup-bundle.sh
+# → opencloud-backup-cloud.example.com-20260729T120000Z.tar.gz
+```
+
+Copy that single file to your new VPS (scp, rsync, object storage, etc.).
+
+**On a fresh VPS:**
+
+```bash
+git clone <repo> opencloud-easy-deploy
+cd opencloud-easy-deploy
+bash restore-bundle.sh /path/to/opencloud-backup-*.tar.gz
+```
+
+That one command installs Docker, uv, restores all data/config/secrets, and runs `apply.sh`. Point DNS at the new server before visiting the URL.
+
+The bundle contains **passwords and keys** — treat it like a secrets backup.
+
+Optional output format: `bash backup-bundle.sh -o /tmp/backup.tar.zst` (requires `zstd`).
+
+---
+
+### Scheduled Borg backups (optional)
+
+For incremental backups on the same server or off-site via SFTP, enable Borg in `deploy.yaml`:
+
+**Local repository (simple, same VPS):**
+
+```yaml
+backup:
+  enabled: true
+  repository:
+    type: local
+    path: /var/backups/opencloud
+  schedule:
+    enabled: true
+    calendar: "*-*-* 03:00:00"
+    persistent: true
+  retention:
+    keep_daily: 7
+    keep_weekly: 4
+    keep_monthly: 6
+    keep_yearly: 0
+```
+
+**SFTP off-site (recommended for crash recovery):**
+
+```yaml
+backup:
+  enabled: true
+  repository:
+    type: sftp
+    host: backup.example.com
+    user: borg
+    path: /repos/opencloud
+    port: 22
+    ssh_key_path: /root/.ssh/borg_backup
+    host_key_check: true
+  schedule:
+    enabled: true
+    calendar: "*-*-* 03:00:00"
+  retention:
+    keep_daily: 7
+    keep_weekly: 4
+    keep_monthly: 6
+```
+
+Each backup archive includes OpenCloud data, `deploy.yaml`, and `secrets.yaml` — restore pulls configuration from the archive, not a separate bootstrap file.
+
+Then run `bash apply.sh` to generate backup config and a `BORG_PASSPHRASE` in `.opencloud-easy-deploy/secrets.yaml`. Store the passphrase and SSH private key safely off-site.
+
+**Run a backup now:**
+
+```bash
+bash backup.sh
+```
+
+**List archives:**
+
+```bash
+bash restore.sh --list
+```
+
+**Restore on this host:**
+
+```bash
+bash stop.sh
+bash restore.sh --latest
+bash apply.sh
+bash start.sh
+```
+
+**Restore on a fresh VPS from Borg:**
+
+```bash
+git clone <repo> opencloud-easy-deploy && cd opencloud-easy-deploy
+export BORG_PASSPHRASE='your-passphrase'
+# SFTP:
+export OCD_BACKUP_SFTP_HOST=backup.example.com
+export OCD_BACKUP_SFTP_USER=borg
+export OCD_BACKUP_SFTP_PATH=/repos/opencloud
+export OCD_BACKUP_SSH_KEY=/root/.ssh/borg_backup
+# Or local repo path:
+# export OCD_BACKUP_LOCAL_PATH=/var/backups/opencloud
+bash restore-borg.sh
+```
+
+`restore-borg.sh` fetches `deploy.yaml` from the archive first, then restores all data using the paths defined there.
+
+Backups include OpenCloud data/config/apps, LDAP state (if OIDC), Euro Office data, `deploy.yaml`, and `secrets.yaml`.
+
+For scheduled backups, `apply.sh` writes systemd unit files to `.opencloud-easy-deploy/backup/systemd/`. Install them:
+
+```bash
+sudo cp .opencloud-easy-deploy/backup/systemd/opencloud-backup.* /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now opencloud-backup.timer
+```
+
+Store the Borg passphrase and SSH key safely off-site — without them, backups cannot be restored. For local repos, sync `/var/backups/opencloud` elsewhere or use `backup-bundle.sh` periodically. For SFTP, the remote repository *is* your off-site copy.
 
 ## Development
 

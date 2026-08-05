@@ -15,6 +15,13 @@ from typing import Any
 
 import yaml
 
+from scripts.backup import (
+    backup_secret_keys,
+    bootstrap_backup,
+    print_backup_summary,
+    validate_backup_config,
+)
+
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 COMPOSE_DIR = PROJECT_ROOT / "opencloud-compose"
 STATE_DIR = PROJECT_ROOT / ".opencloud-easy-deploy"
@@ -114,6 +121,8 @@ def validate_config(config: dict) -> None:
         if not str(weboffice.get("domain") or "").strip():
             raise ValueError("weboffice.domain is required when weboffice is enabled")
 
+    validate_backup_config(config)
+
 
 def derive_compose_files(config: dict) -> list[str]:
     files = ["docker-compose.yml", "external-proxy/opencloud.yml", "../overlays/proxy/caddy.yml"]
@@ -192,16 +201,21 @@ def generate_secret(length: int = 32) -> str:
     return secrets.token_urlsafe(length)
 
 
-def create_or_update_secrets(rotate: bool = False) -> dict[str, str]:
+def secret_keys_for_config(config: dict) -> tuple[str, ...]:
+    return SECRET_KEYS + backup_secret_keys(config)
+
+
+def create_or_update_secrets(config: dict, rotate: bool = False) -> dict[str, str]:
     existing: dict[str, str] = {}
     if SECRETS_PATH.exists() and not rotate:
         raw = load_yaml(SECRETS_PATH)
         existing = {k: str(v) for k, v in raw.items() if v is not None}
 
     secrets_map = dict(existing)
-    for key in SECRET_KEYS:
+    for key in secret_keys_for_config(config):
         if rotate or not secrets_map.get(key):
-            secrets_map[key] = generate_secret(24 if key != "LDAP_BIND_PASSWORD" else 16)
+            length = 16 if key == "LDAP_BIND_PASSWORD" else 24
+            secrets_map[key] = generate_secret(length)
 
     save_yaml(SECRETS_PATH, secrets_map)
     os.chmod(SECRETS_PATH, 0o600)
@@ -605,11 +619,12 @@ def apply(
     validate_config(config)
     ensure_compose_submodule()
 
-    secret_values = create_or_update_secrets(rotate=rotate_secrets)
+    secret_values = create_or_update_secrets(config, rotate=rotate_secrets)
     bootstrap_config(config)
     render_network_overlay(config)
     render_proxy_yaml(config)
     render_caddyfile(config)
+    bootstrap_backup(config, secret_values)
 
     env_vars = build_env_vars(config, secret_values)
     env_path = COMPOSE_DIR / ".env"
@@ -622,6 +637,7 @@ def apply(
         reconcile_runtime(env_path, config)
 
     print_summary(config)
+    print_backup_summary(config)
 
 
 def main() -> None:

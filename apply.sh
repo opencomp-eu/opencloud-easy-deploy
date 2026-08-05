@@ -19,7 +19,7 @@ for arg in "$@"; do
 done
 
 if [[ "$ensure_dependencies" == "true" ]]; then
-	bash "${SCRIPT_DIR}/ensure_dependencies.sh"
+	bash "${SCRIPT_DIR}/ensure-dependencies.sh"
 fi
 
 uv run python "${SCRIPT_DIR}/scripts/apply.py" "${python_args[@]}"
