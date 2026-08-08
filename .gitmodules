@@ -1,3 +1,7 @@
 [submodule "opencloud-compose"]
 	path = opencloud-compose
 	url = https://github.com/opencloud-eu/opencloud-compose.git
+[submodule "easydeploy-lib"]
+	path = easydeploy-lib
+	url = https://github.com/nordwestt/easy-deploy-lib.git
+	branch = main

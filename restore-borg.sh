@@ -34,7 +34,8 @@ info "Installing dependencies…"
 bash "${SCRIPT_DIR}/ensure-dependencies.sh"
 
 info "Restoring from Borg repository…"
-uv run python "${SCRIPT_DIR}/scripts/backup.py" fresh-restore --latest "$@"
+cd "${SCRIPT_DIR}"
+uv run python -m scripts.backup fresh-restore --latest "$@"
 
 info "Starting OpenCloud stack…"
 bash "${SCRIPT_DIR}/apply.sh"

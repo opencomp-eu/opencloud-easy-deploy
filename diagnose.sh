@@ -5,6 +5,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib.sh
 source "${SCRIPT_DIR}/scripts/lib.sh"
+cd "${SCRIPT_DIR}"
 
 COMPOSE_ENV="${SCRIPT_DIR}/opencloud-compose/.env"
 DEPLOY_YAML="${SCRIPT_DIR}/deploy.yaml"

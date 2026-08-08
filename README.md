@@ -9,10 +9,16 @@ This replaces the official test installer (`curl -L https://opencloud.eu/install
 **Requirements:** Linux VPS, Docker Compose v2, DNS pointing at the server, ports 80/443 open.
 
 ```bash
-git clone https://github.com/your-org/opencloud-easy-deploy.git
+git clone --recurse-submodules https://github.com/your-org/opencloud-easy-deploy.git
 cd opencloud-easy-deploy
-bash ensure-dependencies.sh   # Docker, uv, submodule, Python deps
+bash ensure-dependencies.sh   # Docker, uv, submodules, Python deps
 bash wizard.sh                # interactive: writes deploy.yaml and deploys
+```
+
+If you already cloned without submodules:
+
+```bash
+git submodule update --init --recursive
 ```
 
 Or manually:
