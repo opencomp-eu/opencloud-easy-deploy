@@ -10,4 +10,4 @@ if [[ -f "${SCRIPT_DIR}/deploy.yaml" ]] && docker inspect opencloud &>/dev/null 
 	warn "OpenCloud is running — for a consistent backup, run: bash stop.sh"
 fi
 
-exec uv run python "${SCRIPT_DIR}/scripts/bundle.py" create "$@"
+exec "${SCRIPT_DIR}/.venv/bin/python" "${SCRIPT_DIR}/scripts/bundle.py" create "$@"

@@ -3,8 +3,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=scripts/runtime_path.sh
-source "${SCRIPT_DIR}/scripts/runtime_path.sh"
+PYTHON="${SCRIPT_DIR}/.venv/bin/python"
 
 ensure_dependencies="false"
 python_args=()
@@ -24,4 +23,4 @@ if [[ "$ensure_dependencies" == "true" ]]; then
 	bash "${SCRIPT_DIR}/ensure-dependencies.sh"
 fi
 
-uv run python "${SCRIPT_DIR}/scripts/apply.py" "${python_args[@]}"
+exec "$PYTHON" "${SCRIPT_DIR}/scripts/apply.py" "${python_args[@]}"

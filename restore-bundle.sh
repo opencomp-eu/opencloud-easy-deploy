@@ -29,7 +29,7 @@ info "Installing dependencies…"
 bash "${SCRIPT_DIR}/ensure-dependencies.sh"
 
 info "Restoring files from ${BUNDLE}…"
-uv run python "${SCRIPT_DIR}/scripts/bundle.py" restore "$BUNDLE" --skip-apply
+"${SCRIPT_DIR}/.venv/bin/python" "${SCRIPT_DIR}/scripts/bundle.py" restore "$BUNDLE" --skip-apply
 
 info "Starting OpenCloud stack…"
 bash "${SCRIPT_DIR}/apply.sh"
