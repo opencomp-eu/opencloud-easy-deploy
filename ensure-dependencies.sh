@@ -8,8 +8,6 @@ source "${SCRIPT_DIR}/scripts/lib.sh"
 # shellcheck source=scripts/deps_config.sh
 source "${SCRIPT_DIR}/scripts/deps_config.sh"
 
-export PATH="${HOME}/.local/bin:${PATH}"
-
 ensure_git() {
 	if command -v git &>/dev/null; then
 		success "git present ($(git --version | head -1))"

@@ -3,6 +3,8 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/runtime_path.sh
+source "${SCRIPT_DIR}/scripts/runtime_path.sh"
 
 if [[ "${1:-}" == "--list" ]]; then
 	shift
