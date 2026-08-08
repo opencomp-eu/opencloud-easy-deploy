@@ -97,7 +97,8 @@ gather_config() {
 		exit 0
 	}
 
-	"${SCRIPT_DIR}/.venv/bin/python" - <<PY
+	cd "${SCRIPT_DIR}"
+	uv run python - <<PY
 from scripts.config_edit import update_from_wizard
 from pathlib import Path
 

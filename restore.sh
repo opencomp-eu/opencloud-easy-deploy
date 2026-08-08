@@ -3,16 +3,18 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PYTHON="${SCRIPT_DIR}/.venv/bin/python"
+# shellcheck source=scripts/lib.sh
+source "${SCRIPT_DIR}/scripts/lib.sh"
+cd "${SCRIPT_DIR}"
 
 if [[ "${1:-}" == "--list" ]]; then
 	shift
-	exec "$PYTHON" "${SCRIPT_DIR}/scripts/backup.py" list "$@"
+	exec uv run python -m scripts.backup list "$@"
 fi
 
 if [[ "${1:-}" == "--latest" ]]; then
 	shift
-	exec "$PYTHON" "${SCRIPT_DIR}/scripts/backup.py" restore --latest "$@"
+	exec uv run python -m scripts.backup restore --latest "$@"
 fi
 
 if [[ "${1:-}" == "--archive" ]]; then
@@ -20,12 +22,12 @@ if [[ "${1:-}" == "--archive" ]]; then
 	archive="${1:-}"
 	[[ -n "$archive" ]] || { echo "Usage: restore.sh --archive NAME [--dry-run]" >&2; exit 1; }
 	shift
-	exec "$PYTHON" "${SCRIPT_DIR}/scripts/backup.py" restore --archive "$archive" "$@"
+	exec uv run python -m scripts.backup restore --archive "$archive" "$@"
 fi
 
 if [[ "${1:-}" == "--dry-run" ]]; then
 	shift
-	exec "$PYTHON" "${SCRIPT_DIR}/scripts/backup.py" restore --dry-run "$@"
+	exec uv run python -m scripts.backup restore --dry-run "$@"
 fi
 
 cat <<EOF
@@ -41,4 +43,4 @@ After restore:
   bash apply.sh && bash start.sh
 EOF
 
-exec "$PYTHON" "${SCRIPT_DIR}/scripts/backup.py" restore "$@"
+exec uv run python -m scripts.backup restore "$@"

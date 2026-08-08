@@ -42,6 +42,7 @@ ensure_submodules() {
 }
 
 ensure_uv() {
+	export PATH="${HOME}/.local/bin:${PATH}"
 	if command -v uv &>/dev/null; then
 		success "uv present ($(uv --version))"
 		return
@@ -56,6 +57,7 @@ ensure_uv() {
 }
 
 ensure_python_deps() {
+	export PATH="${HOME}/.local/bin:${PATH}"
 	info "Syncing Python dependencies (uv sync --dev)…"
 	uv sync --dev --directory "${SCRIPT_DIR}"
 	success "Python dependencies ready"

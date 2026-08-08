@@ -5,6 +5,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib.sh
 source "${SCRIPT_DIR}/scripts/lib.sh"
+cd "${SCRIPT_DIR}"
 
 COMPOSE_ENV="${SCRIPT_DIR}/opencloud-compose/.env"
 DEPLOY_YAML="${SCRIPT_DIR}/deploy.yaml"
@@ -17,7 +18,7 @@ OC_DOMAIN="${OC_DOMAIN:-}"
 EURO_DOMAIN="${EURO_OFFICE_DOMAIN:-}"
 
 if [[ -z "$OC_DOMAIN" && -f "$DEPLOY_YAML" ]]; then
-	OC_DOMAIN="$("${SCRIPT_DIR}/.venv/bin/python" - <<PY 2>/dev/null || true
+	OC_DOMAIN="$(uv run python - <<PY 2>/dev/null || true
 import yaml
 from pathlib import Path
 data = yaml.safe_load(Path("${DEPLOY_YAML}").read_text()) or {}
@@ -27,7 +28,7 @@ PY
 fi
 
 if [[ -z "$EURO_DOMAIN" && -f "$DEPLOY_YAML" ]]; then
-	EURO_DOMAIN="$("${SCRIPT_DIR}/.venv/bin/python" - <<PY 2>/dev/null || true
+	EURO_DOMAIN="$(uv run python - <<PY 2>/dev/null || true
 import yaml
 from pathlib import Path
 data = yaml.safe_load(Path("${DEPLOY_YAML}").read_text()) or {}

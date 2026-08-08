@@ -5,9 +5,10 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib.sh
 source "${SCRIPT_DIR}/scripts/lib.sh"
+cd "${SCRIPT_DIR}"
 
 if [[ -f "${SCRIPT_DIR}/deploy.yaml" ]] && docker inspect opencloud &>/dev/null 2>&1; then
 	warn "OpenCloud is running — for a consistent backup, run: bash stop.sh"
 fi
 
-exec "${SCRIPT_DIR}/.venv/bin/python" "${SCRIPT_DIR}/scripts/bundle.py" create "$@"
+exec uv run python -m scripts.bundle create "$@"
