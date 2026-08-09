@@ -3,6 +3,9 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/lib.sh
+source "${SCRIPT_DIR}/scripts/lib.sh"
+cd "${SCRIPT_DIR}"
 
 ensure_dependencies="false"
 python_args=()
@@ -22,4 +25,4 @@ if [[ "$ensure_dependencies" == "true" ]]; then
 	bash "${SCRIPT_DIR}/ensure-dependencies.sh"
 fi
 
-uv run python "${SCRIPT_DIR}/scripts/apply.py" "${python_args[@]}"
+exec uv run python -m scripts.apply "${python_args[@]}"
