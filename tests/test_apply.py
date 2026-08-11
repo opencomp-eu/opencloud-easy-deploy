@@ -29,7 +29,7 @@ def _base_config(**overrides) -> dict:
             "apps_dir": "/var/lib/opencloud/apps",
             "language": "en",
         },
-        "proxy": {"type": "caddy"},
+        "proxy": {"type": "caddy", "mode": "standalone", "integrate": {"network": "easydeploy-net"}},
         "auth": {"mode": "builtin"},
         "weboffice": {
             "enabled": True,
@@ -49,6 +49,41 @@ def _base_config(**overrides) -> dict:
         else:
             config[key] = value
     return config
+
+
+def test_derive_compose_files_integrate_excludes_caddy():
+    config = _base_config(proxy={"type": "caddy", "mode": "integrate"})
+    files = derive_compose_files(config)
+    assert "../overlays/proxy/caddy.yml" not in files
+    assert "docker-compose.yml" in files
+
+
+def test_derive_compose_files_oidc_authelia_provider():
+    config = _base_config(
+        auth={
+            "mode": "oidc",
+            "oidc": {
+                "provider": "authelia",
+                "issuer_url": "https://auth.example/o",
+                "account_url": "https://auth.example/",
+                "domain": "auth.example",
+                "client_id": "opencloud",
+            },
+        },
+    )
+    files = derive_compose_files(config)
+    assert "idm/external-authelia.yml" in files
+
+
+def test_render_integration_fragment(tmp_path, monkeypatch):
+    from scripts.apply import INTEGRATION_CADDY_FRAGMENT, render_integration_fragment
+
+    monkeypatch.setattr("scripts.apply.INTEGRATION_DIR", tmp_path)
+    monkeypatch.setattr("scripts.apply.INTEGRATION_CADDY_FRAGMENT", tmp_path / "caddy.caddy")
+    render_integration_fragment(_base_config())
+    text = (tmp_path / "caddy.caddy").read_text()
+    assert "cloud.test.example" in text
+    assert "eurooffice.test.example" in text
 
 
 def test_derive_compose_files_builtin_euro_office():

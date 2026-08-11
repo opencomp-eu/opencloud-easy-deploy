@@ -28,6 +28,9 @@ STATE_DIR = PROJECT_ROOT / ".opencloud-easy-deploy"
 SECRETS_PATH = STATE_DIR / "secrets.yaml"
 DEPLOY_PATH = PROJECT_ROOT / "deploy.yaml"
 NETWORK_OVERLAY_PATH = STATE_DIR / "compose" / "network-fixups.yml"
+INTEGRATION_DIR = STATE_DIR / "integration"
+INTEGRATION_CADDY_FRAGMENT = INTEGRATION_DIR / "caddy.caddy"
+DEFAULT_INTEGRATE_NETWORK = "easydeploy-net"
 CADDY_DIR = PROJECT_ROOT / "caddy"
 CADDY_TEMPLATE = CADDY_DIR / "Caddyfile.template"
 CADDYFILE = CADDY_DIR / "Caddyfile"
@@ -50,6 +53,13 @@ def to_bool(value: Any) -> bool:
     if value is None:
         return False
     return str(value).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def proxy_mode(config: dict) -> str:
+    mode = str((config.get("proxy") or {}).get("mode") or "standalone").strip().lower()
+    if mode not in {"standalone", "integrate"}:
+        raise ValueError("proxy.mode must be 'standalone' or 'integrate'")
+    return mode
 
 
 def load_yaml(path: Path) -> dict:
@@ -122,10 +132,13 @@ def validate_config(config: dict) -> None:
             raise ValueError("weboffice.domain is required when weboffice is enabled")
 
     validate_backup_config(config)
+    proxy_mode(config)
 
 
 def derive_compose_files(config: dict) -> list[str]:
-    files = ["docker-compose.yml", "external-proxy/opencloud.yml", "../overlays/proxy/caddy.yml"]
+    files = ["docker-compose.yml", "external-proxy/opencloud.yml"]
+    if proxy_mode(config) == "standalone":
+        files.append("../overlays/proxy/caddy.yml")
 
     weboffice = config.get("weboffice") or {}
     if to_bool(weboffice.get("enabled")):
@@ -146,6 +159,9 @@ def derive_compose_files(config: dict) -> list[str]:
     auth_mode = str((config.get("auth") or {}).get("mode") or "builtin").lower()
     if auth_mode == "oidc":
         files.extend(["idm/external-idp.yml", "../overlays/idm/oidc-external.yml"])
+        provider = str((config.get("auth") or {}).get("oidc", {}).get("provider") or "").lower()
+        if provider == "authelia":
+            files.append("idm/external-authelia.yml")
 
     modules = config.get("modules") or {}
     if to_bool(modules.get("search")):
@@ -171,6 +187,8 @@ def render_network_overlay(config: dict) -> None:
         "container_name": "opencloud",
         "extra_hosts": [f"{opencloud_domain}:host-gateway"],
     }
+    if proxy_mode(config) == "integrate":
+        opencloud_service["networks"] = ["opencloud-net", DEFAULT_INTEGRATE_NETWORK]
 
     services: dict[str, Any] = {"opencloud": opencloud_service}
 
@@ -182,19 +200,31 @@ def render_network_overlay(config: dict) -> None:
             opencloud_service["extra_hosts"].append(f"{office_domain}:host-gateway")
 
         if office_type == "euro_office":
-            services["euro-office"] = {
+            euro_svc: dict[str, Any] = {
                 "container_name": "euro-office",
                 "extra_hosts": [f"{opencloud_domain}:host-gateway"],
             }
+            if proxy_mode(config) == "integrate":
+                euro_svc["networks"] = ["opencloud-net", DEFAULT_INTEGRATE_NETWORK]
+            services["euro-office"] = euro_svc
         elif office_type == "collabora":
-            services["collabora"] = {
+            collab_svc: dict[str, Any] = {
                 "container_name": "collabora",
                 "extra_hosts": [f"{opencloud_domain}:host-gateway"],
             }
+            if proxy_mode(config) == "integrate":
+                collab_svc["networks"] = ["opencloud-net", DEFAULT_INTEGRATE_NETWORK]
+            services["collabora"] = collab_svc
+
+    overlay: dict[str, Any] = {"services": services}
+    if proxy_mode(config) == "integrate":
+        overlay["networks"] = {
+            DEFAULT_INTEGRATE_NETWORK: {"external": True, "name": DEFAULT_INTEGRATE_NETWORK}
+        }
 
     NETWORK_OVERLAY_PATH.parent.mkdir(parents=True, exist_ok=True)
     with NETWORK_OVERLAY_PATH.open("w") as handle:
-        yaml.safe_dump({"services": services}, handle, default_flow_style=False)
+        yaml.safe_dump(overlay, handle, default_flow_style=False)
 
 
 def generate_secret(length: int = 32) -> str:
@@ -256,8 +286,9 @@ def build_env_vars(config: dict, secrets: dict[str, str]) -> dict[str, str]:
         "OC_APPS_DIR": str(opencloud["apps_dir"]),
         "DEFAULT_LANGUAGE": str(opencloud.get("language") or "en"),
         "START_ADDITIONAL_SERVICES": build_additional_services(config),
-        "OCD_CADDYFILE": str(CADDYFILE.resolve()),
     }
+    if proxy_mode(config) == "standalone":
+        env["OCD_CADDYFILE"] = str(CADDYFILE.resolve())
 
     ldap_base = Path(str(opencloud["config_dir"])).parent
     env["LDAP_CERTS_DIR"] = str(ldap_base / "ldap_certs")
@@ -397,7 +428,7 @@ def render_proxy_yaml(config: dict) -> None:
         proxy_path.write_text(upstream_body)
 
 
-def render_caddyfile(config: dict) -> None:
+def build_caddy_site_blocks(config: dict) -> tuple[str, str]:
     opencloud_domain = str(config["opencloud"]["domain"])
     weboffice = config.get("weboffice") or {}
 
@@ -424,7 +455,6 @@ def render_caddyfile(config: dict) -> None:
             else "collabora:9980"
         )
         if office_domain:
-            # Euro Office/Collabora must be embeddable in OpenCloud iframes (cross-origin).
             euro_block = f"""
 {office_domain} {{
     reverse_proxy {upstream} {{
@@ -439,16 +469,34 @@ def render_caddyfile(config: dict) -> None:
     }}
     encode gzip
     log
-}}"""
+}}""".strip()
 
+    return oc_block.strip(), euro_block
+
+
+def build_caddy_fragment(config: dict) -> str:
+    oc_block, euro_block = build_caddy_site_blocks(config)
+    parts = ["# opencloud-easy-deploy", oc_block]
+    if euro_block:
+        parts.extend(["", "# opencloud-easy-deploy — web office", euro_block])
+    return "\n".join(parts) + "\n"
+
+
+def render_caddyfile(config: dict) -> None:
+    oc_block, euro_block = build_caddy_site_blocks(config)
     rendered = render_template(
         CADDY_TEMPLATE.read_text(),
         {
-            "OC_DOMAIN_BLOCK": oc_block.strip(),
-            "EURO_OFFICE_DOMAIN_BLOCK": euro_block.strip(),
+            "OC_DOMAIN_BLOCK": oc_block,
+            "EURO_OFFICE_DOMAIN_BLOCK": euro_block,
         },
     )
     CADDYFILE.write_text(rendered + "\n")
+
+
+def render_integration_fragment(config: dict) -> None:
+    INTEGRATION_DIR.mkdir(parents=True, exist_ok=True)
+    INTEGRATION_CADDY_FRAGMENT.write_text(build_caddy_fragment(config))
 
 
 def fix_data_permissions(config: dict) -> None:
@@ -548,6 +596,13 @@ def stop_legacy_caddy() -> None:
     )
 
 
+def stop_opencloud_caddy() -> None:
+    if subprocess.run(["docker", "inspect", "opencloud_caddy"], capture_output=True).returncode == 0:
+        print("Stopping standalone opencloud_caddy (integrate mode uses easydeploy-engine)…")
+        subprocess.run(["docker", "stop", "opencloud_caddy"], check=False)
+        subprocess.run(["docker", "rm", "opencloud_caddy"], check=False)
+
+
 def reconcile_runtime(env_path: Path, config: dict) -> None:
     env = {}
     if env_path.is_file():
@@ -558,12 +613,18 @@ def reconcile_runtime(env_path: Path, config: dict) -> None:
             env[key.strip()] = value.strip()
 
     ensure_docker_network("opencloud-net")
+    if proxy_mode(config) == "integrate":
+        ensure_docker_network(DEFAULT_INTEGRATE_NETWORK)
+        stop_opencloud_caddy()
     stop_legacy_caddy()
 
     print("Pulling OpenCloud stack images…")
     run_compose(COMPOSE_DIR, "pull", env=env)
 
-    print("Starting OpenCloud stack (includes Caddy)…")
+    if proxy_mode(config) == "integrate":
+        print("Starting OpenCloud stack (no local Caddy — use easydeploy-engine)…")
+    else:
+        print("Starting OpenCloud stack (includes Caddy)…")
     run_compose(COMPOSE_DIR, "up", "-d", "--wait", "--force-recreate", env=env)
 
     weboffice = config.get("weboffice") or {}
@@ -585,6 +646,11 @@ def print_summary(config: dict) -> None:
     print(f"  - {domain}")
     if to_bool(weboffice.get("enabled")):
         print(f"  - {weboffice.get('domain')}")
+
+    if proxy_mode(config) == "integrate":
+        print()
+        print(f"Proxy mode: integrate (fragment: {INTEGRATION_CADDY_FRAGMENT})")
+        print("Run easydeploy-engine apply.sh after enabling OpenCloud in engine.yaml.")
 
     auth_mode = str((config.get("auth") or {}).get("mode") or "builtin").lower()
     if auth_mode == "builtin":
@@ -623,7 +689,10 @@ def apply(
     bootstrap_config(config)
     render_network_overlay(config)
     render_proxy_yaml(config)
-    render_caddyfile(config)
+    if proxy_mode(config) == "integrate":
+        render_integration_fragment(config)
+    else:
+        render_caddyfile(config)
     bootstrap_backup(config, secret_values)
 
     env_vars = build_env_vars(config, secret_values)

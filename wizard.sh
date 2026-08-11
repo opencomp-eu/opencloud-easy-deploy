@@ -21,7 +21,7 @@ gather_config() {
 	local role_admin role_user role_guest
 	local weboffice_enabled weboffice_domain
 	local modules_search modules_antivirus modules_radicale modules_monitoring
-	local base_domain proceed
+	local base_domain proceed proxy_mode
 
 	print_banner
 	echo -e "  Press Enter to accept a ${CYAN}[default]${RESET}.\n"
@@ -80,6 +80,11 @@ gather_config() {
 	ask_yn modules_monitoring "Enable monitoring endpoints?" "n"
 
 	echo
+	echo -e "${BOLD}  Reverse proxy${RESET}"
+	ask proxy_mode "Proxy mode: standalone or integrate" "standalone"
+	proxy_mode="${proxy_mode,,}"
+
+	echo
 	echo -e "${BOLD}  Summary${RESET}"
 	echo "  OpenCloud:     https://${domain}"
 	if [[ "$weboffice_enabled" == "y" ]]; then
@@ -87,6 +92,7 @@ gather_config() {
 	fi
 	echo "  Auth:          ${auth_mode}"
 	echo "  Data root:     ${data_root}"
+	echo "  Proxy mode:    ${proxy_mode}"
 	echo
 	echo "  Ensure DNS A/AAAA records point to this server before continuing."
 	echo
@@ -120,6 +126,7 @@ update_from_wizard(
     modules_antivirus=${modules_antivirus@Q} == "y",
     modules_radicale=${modules_radicale@Q} == "y",
     modules_monitoring=${modules_monitoring@Q} == "y",
+    proxy_mode=${proxy_mode@Q},
     path=Path(${DEPLOY_YAML@Q}),
 )
 PY

@@ -51,6 +51,7 @@ def update_from_wizard(
     modules_antivirus: bool,
     modules_radicale: bool,
     modules_monitoring: bool,
+    proxy_mode: str = "standalone",
     path: Path = DEFAULT_DEPLOY_PATH,
 ) -> None:
     config = load_or_init(path)
@@ -65,7 +66,11 @@ def update_from_wizard(
     opencloud["config_dir"] = f"{data_root.rstrip('/')}/config"
     opencloud["apps_dir"] = f"{data_root.rstrip('/')}/apps"
 
-    config["proxy"] = {"type": "caddy"}
+    config["proxy"] = {
+        "type": "caddy",
+        "mode": proxy_mode,
+        "integrate": {"network": "easydeploy-net"},
+    }
     config["auth"] = {
         "mode": auth_mode,
         "oidc": {

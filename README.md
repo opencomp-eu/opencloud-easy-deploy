@@ -54,7 +54,7 @@ bash apply.sh
 See [`deploy.yaml.example`](deploy.yaml.example). Key sections:
 
 - **opencloud** — domain, image tag, persistent `data_dir` / `config_dir` / `apps_dir`
-- **proxy** — `caddy` (only option in v1)
+- **proxy** — `caddy` with `mode: standalone` (default) or `integrate` (shared Caddy via [easydeploy-engine](../easydeploy-engine))
 - **auth** — `builtin` (simple admin login) or `oidc` (external IdP)
 - **weboffice** — `euro_office` or `collabora` (mutually exclusive with each other)
 - **modules** — optional search, antivirus, radicale, monitoring
@@ -69,6 +69,8 @@ Uses OpenCloud's built-in LDAP. Admin password is generated on first `apply.sh` 
 ### External OIDC (Authentik, Keycloak, …)
 
 Set `auth.mode: oidc` and configure `auth.oidc` in `deploy.yaml`. The stack adds `idm/external-idp.yml` plus a local overlay for role mapping via `proxy.yaml`.
+
+For **Authelia** on the same VPS (with easydeploy-engine), set `auth.oidc.provider: authelia` and follow [`docs/integrating-engine.md`](docs/integrating-engine.md).
 
 #### Authentik setup
 

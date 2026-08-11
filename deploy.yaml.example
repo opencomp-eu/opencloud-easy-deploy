@@ -13,12 +13,16 @@ opencloud:
 
 proxy:
   type: caddy
+  mode: standalone
+  integrate:
+    network: easydeploy-net
 
 # auth.mode: builtin — built-in LDAP admin (simple VPS default)
-# auth.mode: oidc   — external IdP (Authentik, Keycloak, etc.)
+# auth.mode: oidc   — external IdP (Authentik, Keycloak, Authelia, …)
 auth:
   mode: builtin
   oidc:
+    # provider: authelia  — adds idm/external-authelia.yml compose overlay when set
     issuer_url: https://authentik.example.com/application/o/opencloud/
     account_url: https://authentik.example.com/if/user/
     domain: authentik.example.com
