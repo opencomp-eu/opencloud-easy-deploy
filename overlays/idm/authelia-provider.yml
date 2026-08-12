@@ -4,6 +4,10 @@ services:
   opencloud:
     environment:
       PROXY_OIDC_ACCESS_TOKEN_VERIFY_METHOD: "none"
+      PROXY_OIDC_REWRITE_WELLKNOWN: "true"
+      PROXY_AUTOPROVISION_ACCOUNTS: "true"
+      PROXY_USER_OIDC_CLAIM: "preferred_username"
+      PROXY_USER_CS3_CLAIM: "username"
       PROXY_AUTOPROVISION_CLAIM_USERNAME: "preferred_username"
       PROXY_AUTOPROVISION_CLAIM_EMAIL: "email"
       PROXY_AUTOPROVISION_CLAIM_DISPLAYNAME: "name"

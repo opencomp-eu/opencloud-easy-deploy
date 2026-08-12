@@ -39,6 +39,7 @@ CADDYFILE = CADDY_DIR / "Caddyfile"
 PROXY_ROLE_TEMPLATE = (
     PROJECT_ROOT / "config-templates" / "opencloud" / "proxy.yaml.template"
 )
+CSP_TEMPLATE = PROJECT_ROOT / "config-templates" / "opencloud" / "csp.yaml.template"
 
 SECRET_KEYS = (
     "INITIAL_ADMIN_PASSWORD",
@@ -482,8 +483,20 @@ def render_proxy_yaml(config: dict) -> None:
             },
         )
         proxy_path.write_text(f"{role_block.rstrip()}\n{upstream_body.lstrip()}")
+        render_csp_yaml(config)
     elif not proxy_path.exists():
         proxy_path.write_text(upstream_body)
+
+
+def render_csp_yaml(config: dict) -> None:
+    config_dir = Path(str(config["opencloud"]["config_dir"]))
+    csp_path = config_dir / "csp.yaml"
+    oidc = config["auth"]["oidc"]
+    rendered = render_template(
+        CSP_TEMPLATE.read_text(),
+        {"IDP_DOMAIN": str(oidc["domain"])},
+    )
+    csp_path.write_text(rendered)
 
 
 def build_caddy_site_blocks(config: dict) -> tuple[str, str]:
