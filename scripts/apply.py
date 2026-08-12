@@ -31,6 +31,8 @@ NETWORK_OVERLAY_PATH = STATE_DIR / "compose" / "network-fixups.yml"
 INTEGRATION_DIR = STATE_DIR / "integration"
 INTEGRATION_CADDY_FRAGMENT = INTEGRATION_DIR / "caddy.caddy"
 DEFAULT_INTEGRATE_NETWORK = "easydeploy-net"
+BITNAMI_OPENLDAP_UID = 1001
+BITNAMI_OPENLDAP_GID = 1001
 CADDY_DIR = PROJECT_ROOT / "caddy"
 CADDY_TEMPLATE = CADDY_DIR / "Caddyfile.template"
 CADDYFILE = CADDY_DIR / "Caddyfile"
@@ -217,9 +219,13 @@ def render_network_overlay(config: dict) -> None:
             services["collabora"] = collab_svc
 
     overlay: dict[str, Any] = {"services": services}
+    overlay["networks"] = {
+        "opencloud-net": {"external": True, "name": "opencloud-net"},
+    }
     if proxy_mode(config) == "integrate":
-        overlay["networks"] = {
-            DEFAULT_INTEGRATE_NETWORK: {"external": True, "name": DEFAULT_INTEGRATE_NETWORK}
+        overlay["networks"][DEFAULT_INTEGRATE_NETWORK] = {
+            "external": True,
+            "name": DEFAULT_INTEGRATE_NETWORK,
         }
 
     NETWORK_OVERLAY_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -366,6 +372,47 @@ def ensure_compose_submodule() -> None:
         raise FileNotFoundError("Failed to initialize opencloud-compose submodule")
 
 
+def bootstrap_ldap_tls(ldap_certs_dir: Path) -> None:
+    """Pre-create LDAP TLS material on the host (Bitnami entrypoint cannot write bind mounts)."""
+    key_path = ldap_certs_dir / "openldap.key"
+    cert_path = ldap_certs_dir / "openldap.crt"
+    if key_path.is_file() and cert_path.is_file():
+        return
+
+    ldap_certs_dir.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        [
+            "openssl",
+            "req",
+            "-x509",
+            "-newkey",
+            "rsa:4096",
+            "-keyout",
+            str(key_path),
+            "-out",
+            str(cert_path),
+            "-sha256",
+            "-days",
+            "365",
+            "-batch",
+            "-nodes",
+            "-subj",
+            "/CN=opencloud-ldap",
+        ],
+        check=True,
+        capture_output=True,
+    )
+    key_path.chmod(0o640)
+    cert_path.chmod(0o644)
+    if os.geteuid() == 0:
+        try:
+            shutil.chown(key_path, BITNAMI_OPENLDAP_UID, BITNAMI_OPENLDAP_GID)
+            shutil.chown(cert_path, BITNAMI_OPENLDAP_UID, BITNAMI_OPENLDAP_GID)
+            shutil.chown(ldap_certs_dir, BITNAMI_OPENLDAP_UID, BITNAMI_OPENLDAP_GID)
+        except OSError:
+            key_path.chmod(0o644)
+
+
 def bootstrap_config(config: dict) -> None:
     opencloud = config["opencloud"]
     config_dir = Path(str(opencloud["config_dir"]))
@@ -382,6 +429,10 @@ def bootstrap_config(config: dict) -> None:
         ldap_base / "ldap_data",
     ):
         directory.mkdir(parents=True, exist_ok=True)
+
+    auth_mode = str((config.get("auth") or {}).get("mode") or "builtin").lower()
+    if auth_mode == "oidc":
+        bootstrap_ldap_tls(ldap_base / "ldap_certs")
 
     upstream_config = COMPOSE_DIR / "config" / "opencloud"
     if not upstream_config.is_dir():
@@ -501,18 +552,27 @@ def render_integration_fragment(config: dict) -> None:
 
 def fix_data_permissions(config: dict) -> None:
     opencloud = config["opencloud"]
+    config_dir = Path(str(opencloud["config_dir"]))
+    ldap_base = config_dir.parent
+    auth_mode = str((config.get("auth") or {}).get("mode") or "builtin").lower()
     paths = [
-        Path(str(opencloud["config_dir"])),
+        config_dir,
         Path(str(opencloud["data_dir"])),
         Path(str(opencloud["apps_dir"])),
-        Path(str(opencloud["config_dir"])).parent / "ldap_certs",
-        Path(str(opencloud["config_dir"])).parent / "ldap_data",
     ]
     if os.geteuid() != 0:
         return
     for path in paths:
         if path.exists():
             shutil.chown(path, user=1000, group=1000)
+    if auth_mode == "oidc":
+        for name in ("ldap_certs", "ldap_data"):
+            path = ldap_base / name
+            if path.exists():
+                try:
+                    shutil.chown(path, BITNAMI_OPENLDAP_UID, BITNAMI_OPENLDAP_GID)
+                except OSError:
+                    pass
 
 
 def docker_compose_cmd() -> list[str]:

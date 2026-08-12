@@ -9,4 +9,5 @@ services:
 
 networks:
   opencloud-net:
+    external: true
     name: opencloud-net

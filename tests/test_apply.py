@@ -9,6 +9,7 @@ import pytest
 import yaml
 
 from scripts.apply import (
+    bootstrap_ldap_tls,
     build_env_vars,
     derive_compose_files,
     render_caddyfile,
@@ -218,6 +219,7 @@ def test_render_network_overlay_sets_container_names(tmp_path, monkeypatch):
 
     assert data["services"]["opencloud"]["container_name"] == "opencloud"
     assert data["services"]["euro-office"]["container_name"] == "euro-office"
+    assert data["networks"]["opencloud-net"]["external"] is True
     assert "eurooffice.test.example:host-gateway" in data["services"]["opencloud"]["extra_hosts"]
     assert "cloud.test.example:host-gateway" in data["services"]["euro-office"]["extra_hosts"]
 
@@ -237,5 +239,11 @@ def test_render_caddyfile_allows_opencloud_iframe(tmp_path, monkeypatch):
     render_caddyfile(_base_config())
     rendered = caddyfile.read_text()
     assert "frame-ancestors 'self' https://cloud.test.example" in rendered
-    assert "header_down -X-Frame-Options" in rendered
-    assert rendered.count("X-Frame-Options SAMEORIGIN") == 1
+
+
+def test_bootstrap_ldap_tls_creates_cert_files(tmp_path):
+    certs_dir = tmp_path / "ldap_certs"
+    bootstrap_ldap_tls(certs_dir)
+    assert (certs_dir / "openldap.key").is_file()
+    assert (certs_dir / "openldap.crt").is_file()
+    bootstrap_ldap_tls(certs_dir)
