@@ -74,6 +74,7 @@ def test_derive_compose_files_oidc_authelia_provider():
     )
     files = derive_compose_files(config)
     assert "idm/external-authelia.yml" in files
+    assert "../overlays/idm/authelia-provider.yml" in files
 
 
 def test_render_integration_fragment(tmp_path, monkeypatch):

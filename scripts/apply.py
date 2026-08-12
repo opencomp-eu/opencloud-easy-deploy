@@ -164,6 +164,7 @@ def derive_compose_files(config: dict) -> list[str]:
         provider = str((config.get("auth") or {}).get("oidc", {}).get("provider") or "").lower()
         if provider == "authelia":
             files.append("idm/external-authelia.yml")
+            files.append("../overlays/idm/authelia-provider.yml")
 
     modules = config.get("modules") or {}
     if to_bool(modules.get("search")):
@@ -494,7 +495,10 @@ def build_caddy_site_blocks(config: dict) -> tuple[str, str]:
     log"""
 
     oc_block = f"""{opencloud_domain} {{
-    reverse_proxy opencloud:9200{oc_security_headers}
+    reverse_proxy opencloud:9200 {{
+        header_up X-Forwarded-Proto {{scheme}}
+        header_up X-Forwarded-Host {{host}}
+    }}{oc_security_headers}
 }}"""
 
     euro_block = ""

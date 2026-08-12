@@ -18,12 +18,12 @@ opencloud:
 auth:
   mode: oidc
   oidc:
-    provider: authelia   # adds idm/external-authelia.yml overlay
+    provider: authelia   # adds Authelia-specific compose overlay
     issuer_url: https://auth.example.com
     account_url: https://auth.example.com/
     domain: auth.example.com
     client_id: opencloud
-    client_scopes: openid profile email offline_access
+    client_scopes: openid profile email groups offline_access
     role_claim: groups
     role_mapping:
       admin: opencloud-admin
@@ -33,29 +33,43 @@ auth:
 
 ## Authelia OIDC client
 
-In Authelia `deploy.yaml`, add an OIDC client (after OpenCloud domain is known):
+OpenCloud's **browser** login uses a **public** OIDC client with PKCE (no client secret). The client ID must match `auth.oidc.client_id` in OpenCloud (`opencloud` above).
+
+In Authelia `deploy.yaml`:
 
 ```yaml
 oidc:
+  enabled: true
   clients:
-    - id: opencloud
-      description: OpenCloud
-      secret: "<generated>"
+    - client_id: opencloud
+      client_name: OpenCloud
+      public: true
+      authorization_policy: two_factor
+      require_pkce: true
+      pkce_challenge_method: S256
+      token_endpoint_auth_method: none
       redirect_uris:
+        - https://cloud.example.com/
         - https://cloud.example.com/oidc-callback.html
+        - https://cloud.example.com/oidc-silent-redirect.html
       scopes:
         - openid
+        - offline_access
+        - groups
         - profile
         - email
-        - offline_access
       grant_types:
         - authorization_code
+        - refresh_token
       response_types:
         - code
-      authorization_policy: two_factor
 ```
 
+Give your user the `opencloud-admin` group in Authelia `deploy.yaml` (`users:` section), not by editing `users_database.yml` directly.
+
 Re-run `bash apply.sh` in authelia-easy-deploy, then opencloud-easy-deploy, then easydeploy-engine.
+
+Official reference: [Authelia — openCloud client](https://www.authelia.com/integration/openid-connect/clients/opencloud/)
 
 ## Apply order
 
