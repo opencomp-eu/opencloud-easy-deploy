@@ -318,6 +318,12 @@ def build_env_vars(config: dict, secrets: dict[str, str]) -> dict[str, str]:
 
     if auth_mode == "oidc":
         role_mapping = oidc.get("role_mapping") or {}
+        provider = str(oidc.get("provider") or "").lower()
+        default_scopes = (
+            "openid profile email groups"
+            if provider == "authelia"
+            else "openid profile email offline_access"
+        )
         env.update(
             {
                 "LDAP_BIND_PASSWORD": secrets["LDAP_BIND_PASSWORD"],
@@ -331,7 +337,7 @@ def build_env_vars(config: dict, secrets: dict[str, str]) -> dict[str, str]:
                 ),
                 "OC_OIDC_CLIENT_ID": str(oidc["client_id"]),
                 "OC_OIDC_CLIENT_SCOPES": str(
-                    oidc.get("client_scopes") or "openid profile email offline_access"
+                    oidc.get("client_scopes") or default_scopes
                 ),
                 "OC_SHARING_PUBLIC_SHARE_MUST_HAVE_PASSWORD": "false",
                 "OC_SHARING_PUBLIC_WRITEABLE_SHARE_MUST_HAVE_PASSWORD": "false",
@@ -726,6 +732,7 @@ def print_summary(config: dict) -> None:
         print()
         print("OIDC auth: configure your IdP with these redirect URIs (strict):")
         print(f"  - https://{domain}/")
+        print(f"  - https://{domain}/web-oidc-callback")
         print(f"  - https://{domain}/oidc-callback.html")
         print(f"  - https://{domain}/oidc-silent-redirect.html")
         print()

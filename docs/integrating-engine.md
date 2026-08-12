@@ -23,7 +23,7 @@ auth:
     account_url: https://auth.example.com/
     domain: auth.example.com
     client_id: opencloud
-    client_scopes: openid profile email groups offline_access
+    client_scopes: openid profile email groups
     role_claim: groups
     role_mapping:
       admin: opencloud-admin
@@ -50,6 +50,7 @@ oidc:
       token_endpoint_auth_method: none
       redirect_uris:
         - https://cloud.example.com/
+        - https://cloud.example.com/web-oidc-callback
         - https://cloud.example.com/oidc-callback.html
         - https://cloud.example.com/oidc-silent-redirect.html
       scopes:

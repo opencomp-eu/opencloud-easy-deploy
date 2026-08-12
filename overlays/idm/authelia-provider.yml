@@ -3,7 +3,7 @@
 services:
   opencloud:
     environment:
-      PROXY_OIDC_ACCESS_TOKEN_VERIFY_METHOD: "jwt"
+      PROXY_OIDC_ACCESS_TOKEN_VERIFY_METHOD: "none"
       PROXY_AUTOPROVISION_CLAIM_USERNAME: "preferred_username"
       PROXY_AUTOPROVISION_CLAIM_EMAIL: "email"
       PROXY_AUTOPROVISION_CLAIM_DISPLAYNAME: "name"
@@ -11,7 +11,8 @@ services:
       PROXY_ROLE_ASSIGNMENT_DRIVER: "oidc"
       GRAPH_ASSIGN_DEFAULT_USER_ROLE: "false"
       WEBFINGER_WEB_OIDC_CLIENT_ID: ${OC_OIDC_CLIENT_ID}
-      WEBFINGER_WEB_OIDC_CLIENT_SCOPES: "openid profile email groups offline_access"
+      WEBFINGER_WEB_OIDC_CLIENT_SCOPES: "openid profile email groups"
+      WEB_OIDC_SCOPE: "openid profile email groups"
       WEBFINGER_ANDROID_OIDC_CLIENT_ID: ${WEBFINGER_ANDROID_OIDC_CLIENT_ID:-opencloud-android}
       WEBFINGER_ANDROID_OIDC_CLIENT_SCOPES: "openid profile email groups offline_access"
       WEBFINGER_IOS_OIDC_CLIENT_ID: ${WEBFINGER_IOS_OIDC_CLIENT_ID:-opencloud-ios}
