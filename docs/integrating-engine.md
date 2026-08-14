@@ -68,6 +68,21 @@ oidc:
 
 Give your user the `opencloud-admin` group in Authelia `deploy.yaml` (`users:` section), not by editing `users_database.yml` directly.
 
+Authelia must also allow browser CORS for the token/userinfo endpoints (OpenCloud Web POSTs the auth code from `https://cloud…` to `https://auth…`). `apply.sh` in authelia-easy-deploy now writes this automatically:
+
+```yaml
+identity_providers:
+  oidc:
+    cors:
+      endpoints:
+        - authorization
+        - token
+        - revocation
+        - userinfo
+        - introspection
+      allowed_origins_from_client_redirect_uris: true
+```
+
 Re-run `bash apply.sh` in authelia-easy-deploy, then opencloud-easy-deploy, then easydeploy-engine.
 
 Official reference: [Authelia — openCloud client](https://www.authelia.com/integration/openid-connect/clients/opencloud/)

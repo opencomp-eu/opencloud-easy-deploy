@@ -225,6 +225,23 @@ def test_render_network_overlay_sets_container_names(tmp_path, monkeypatch):
     assert "cloud.test.example:host-gateway" in data["services"]["euro-office"]["extra_hosts"]
 
 
+def test_render_network_overlay_adds_idp_host_gateway(tmp_path, monkeypatch):
+    from scripts import apply as apply_module
+
+    overlay_path = tmp_path / "network-fixups.yml"
+    monkeypatch.setattr(apply_module, "NETWORK_OVERLAY_PATH", overlay_path)
+    render_network_overlay(
+        _base_config(
+            auth={
+                "mode": "oidc",
+                "oidc": {"domain": "auth.test.example"},
+            }
+        )
+    )
+    data = yaml.safe_load(overlay_path.read_text())
+    assert "auth.test.example:host-gateway" in data["services"]["opencloud"]["extra_hosts"]
+
+
 def test_render_caddyfile_allows_opencloud_iframe(tmp_path, monkeypatch):
     from scripts import apply as apply_module
 

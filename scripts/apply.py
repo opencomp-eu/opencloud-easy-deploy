@@ -187,9 +187,15 @@ def render_network_overlay(config: dict) -> None:
     opencloud_domain = str(config["opencloud"]["domain"])
     weboffice = config.get("weboffice") or {}
 
+    extra_hosts = [f"{opencloud_domain}:host-gateway"]
+    oidc = (config.get("auth") or {}).get("oidc") or {}
+    idp_domain = str(oidc.get("domain") or "").strip()
+    if idp_domain and idp_domain != opencloud_domain:
+        extra_hosts.append(f"{idp_domain}:host-gateway")
+
     opencloud_service: dict[str, Any] = {
         "container_name": "opencloud",
-        "extra_hosts": [f"{opencloud_domain}:host-gateway"],
+        "extra_hosts": extra_hosts,
     }
     if proxy_mode(config) == "integrate":
         opencloud_service["networks"] = ["opencloud-net", DEFAULT_INTEGRATE_NETWORK]
