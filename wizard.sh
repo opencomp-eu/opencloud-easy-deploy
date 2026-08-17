@@ -9,6 +9,7 @@ source "${SCRIPT_DIR}/scripts/lib.sh"
 DEPLOY_YAML="${SCRIPT_DIR}/deploy.yaml"
 NO_APPLY=0
 PROXY_MODE=""
+FROM_ENGINE=0
 
 usage() {
 	echo "Usage: bash wizard.sh [--from-engine] [--no-apply] [--proxy-mode standalone|integrate]"
@@ -23,6 +24,7 @@ while [[ $# -gt 0 ]]; do
 		--from-engine)
 			NO_APPLY=1
 			PROXY_MODE="integrate"
+			FROM_ENGINE=1
 			shift
 			;;
 		--no-apply)
@@ -57,10 +59,12 @@ gather_config() {
 	local weboffice_enabled weboffice_domain
 	local modules_search modules_antivirus modules_radicale modules_monitoring
 	local base_domain proceed proxy_mode use_local_authelia oidc_provider
-	local authelia_deploy authelia_domain
+	local authelia_domain default_idp
+	local LOCAL_AUTHELIA_DOMAIN="" LOCAL_AUTHELIA_DEPLOY=""
 
 	print_banner
 	echo -e "  Press Enter to accept a ${CYAN}[default]${RESET}.\n"
+	cd "${SCRIPT_DIR}"
 
 	ask domain "OpenCloud domain (e.g. cloud.example.com)" "cloud.example.com"
 	base_domain="$(base_domain_from_host "$domain")"
@@ -69,29 +73,28 @@ gather_config() {
 
 	echo
 	echo -e "${BOLD}  Authentication${RESET}"
-	authelia_deploy="$(cd "${SCRIPT_DIR}/.." && pwd)/authelia-easy-deploy/deploy.yaml"
+	eval "$(uv run python -m scripts.config_edit --print-local-authelia)"
 	use_local_authelia="n"
 	oidc_provider=""
-	if [[ -f "$authelia_deploy" ]]; then
-		ask_yn use_local_authelia "Use Authelia on this VPS as the OpenCloud IdP?" "y"
+	authelia_domain="${LOCAL_AUTHELIA_DOMAIN:-}"
+	if [[ -n "$authelia_domain" ]]; then
+		if [[ "${FROM_ENGINE}" == "1" ]]; then
+			use_local_authelia="y"
+			info "Using Authelia on this VPS at https://${authelia_domain}."
+		else
+			ask_yn use_local_authelia "Use Authelia at https://${authelia_domain} as the OpenCloud IdP?" "y"
+		fi
 	fi
 	if [[ "$use_local_authelia" == "y" ]]; then
+		if [[ -z "$authelia_domain" ]]; then
+			die "Authelia was selected but no portal domain was found."
+		fi
 		auth_mode="oidc"
 		oidc_provider="authelia"
-		authelia_domain="$(uv run python - <<PY
-import yaml
-from pathlib import Path
-data = yaml.safe_load(Path(${authelia_deploy@Q}).read_text()) or {}
-print((data.get("authelia") or {}).get("domain") or "")
-PY
-)"
-		if [[ -z "$authelia_domain" ]]; then
-			die "Could not read authelia.domain from ${authelia_deploy}"
-		fi
 		oidc_issuer="https://${authelia_domain}"
 		oidc_account="https://${authelia_domain}/"
 		oidc_domain="$authelia_domain"
-		info "Using Authelia at https://${authelia_domain} (engine will register the OIDC client)."
+		info "OIDC issuer: ${oidc_issuer} (engine will register the OIDC client)."
 	else
 		ask auth_mode "Auth mode: builtin or oidc" "builtin"
 		auth_mode="${auth_mode,,}"
@@ -116,12 +119,16 @@ PY
 	fi
 
 	if [[ "$auth_mode" == "oidc" && "$use_local_authelia" != "y" ]]; then
+		default_idp="${authelia_domain:-auth.${base_domain}}"
 		echo
-		echo -e "${BOLD}  External OIDC (Authentik, Keycloak, remote Authelia, …)${RESET}"
-		ask oidc_issuer "OIDC issuer URL" "https://authentik.${base_domain}/application/o/opencloud/"
-		ask oidc_account "Account settings URL" "https://authentik.${base_domain}/if/user/"
-		ask oidc_domain "IdP domain (for CSP)" "authentik.${base_domain}"
+		echo -e "${BOLD}  OIDC issuer (Authelia, Authentik, Keycloak, …)${RESET}"
+		echo "  Authelia issuer is the portal origin, e.g. https://auth.${base_domain}"
+		ask oidc_issuer "OIDC issuer URL" "https://${default_idp}"
+		ask oidc_account "Account settings URL" "https://${default_idp}/"
+		ask oidc_domain "IdP domain (for CSP)" "${default_idp}"
 		ask oidc_client_id "OIDC client ID" "opencloud"
+		ask oidc_provider "Provider: authelia, authentik, keycloak, or other" "authelia"
+		oidc_provider="${oidc_provider,,}"
 		ask role_admin "Admin group name" "opencloud-admin"
 		ask role_user "User group name" "opencloud-user"
 		ask role_guest "Guest group name" "opencloud-guest"
@@ -212,6 +219,7 @@ PY
 
 main() {
 	bash "${SCRIPT_DIR}/ensure-dependencies.sh"
+	cd "${SCRIPT_DIR}"
 	gather_config
 	if [[ "${NO_APPLY}" == "1" ]]; then
 		info "Skipping apply (--no-apply / --from-engine). easydeploy-engine will apply."

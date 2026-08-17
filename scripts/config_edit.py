@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+import os
+import shlex
 from pathlib import Path
 
 import yaml
@@ -30,6 +32,50 @@ def load_or_init(path: Path = DEFAULT_DEPLOY_PATH) -> dict:
 def save(path: Path, data: dict) -> None:
     with path.open("w") as handle:
         yaml.safe_dump(data, handle, default_flow_style=False, sort_keys=False)
+
+
+def read_authelia_domain(deploy_path: Path) -> str:
+    if not deploy_path.is_file():
+        return ""
+    with deploy_path.open() as handle:
+        data = yaml.safe_load(handle) or {}
+    if not isinstance(data, dict):
+        return ""
+    return str((data.get("authelia") or {}).get("domain") or "").strip()
+
+
+def discover_local_authelia(opencloud_root: Path = PROJECT_ROOT) -> dict[str, str]:
+    """Find a sibling (or engine-exported) Authelia deploy.yaml and portal domain."""
+    candidates: list[Path] = []
+    env_deploy = str(os.environ.get("EASYDEPLOY_AUTHELIA_DEPLOY") or "").strip()
+    if env_deploy:
+        candidates.append(Path(env_deploy).expanduser())
+    candidates.append((opencloud_root.parent / "authelia-easy-deploy" / "deploy.yaml").resolve())
+
+    seen: set[Path] = set()
+    for path in candidates:
+        resolved = path.resolve()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        domain = read_authelia_domain(resolved)
+        if domain:
+            return {"domain": domain, "deploy": str(resolved)}
+
+    env_domain = str(os.environ.get("EASYDEPLOY_AUTHELIA_DOMAIN") or "").strip()
+    if env_domain:
+        return {"domain": env_domain, "deploy": env_deploy}
+    return {}
+
+
+def emit_local_authelia(opencloud_root: Path = PROJECT_ROOT) -> str:
+    found = discover_local_authelia(opencloud_root)
+    domain = found.get("domain", "")
+    deploy = found.get("deploy", "")
+    return (
+        f"LOCAL_AUTHELIA_DOMAIN={shlex.quote(domain)}\n"
+        f"LOCAL_AUTHELIA_DEPLOY={shlex.quote(deploy)}\n"
+    )
 
 
 def update_from_wizard(
@@ -128,8 +174,13 @@ def update_from_wizard(
 def main() -> None:
     parser = argparse.ArgumentParser(description="Edit deploy.yaml")
     parser.add_argument("--show", action="store_true", help="Print deploy.yaml as JSON")
+    parser.add_argument("--print-local-authelia", action="store_true")
     parser.add_argument("--path", type=Path, default=DEFAULT_DEPLOY_PATH)
     args = parser.parse_args()
+
+    if args.print_local_authelia:
+        print(emit_local_authelia(PROJECT_ROOT), end="")
+        return
 
     if args.show:
         import json
