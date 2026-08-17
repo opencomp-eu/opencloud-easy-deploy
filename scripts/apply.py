@@ -89,12 +89,57 @@ def render_template(template: str, values: dict[str, str]) -> str:
     return rendered
 
 
+def _blank(value: Any) -> bool:
+    if value is None:
+        return True
+    if isinstance(value, str):
+        return not value.strip()
+    if isinstance(value, dict):
+        return not value
+    return False
+
+
+def managed_is_false(section: dict | None) -> bool:
+    value = (section or {}).get("managed")
+    if value is False:
+        return True
+    return str(value or "").strip().lower() in {"false", "no", "0"}
+
+
+def apply_engine_oidc_sidecar(config: dict, sidecar_path: Path | None = None) -> None:
+    """Merge engine-generated Authelia OIDC settings. Operator deploy.yaml wins when set."""
+    path = sidecar_path or (INTEGRATION_DIR / "oidc-provider.yaml")
+    if not path.is_file():
+        return
+    sidecar = load_yaml(path)
+    if not isinstance(sidecar, dict):
+        return
+    auth = config.setdefault("auth", {})
+    oidc = auth.setdefault("oidc", {})
+    if not isinstance(oidc, dict):
+        return
+    if managed_is_false(oidc):
+        return
+    existing_provider = str(oidc.get("provider") or "").strip().lower()
+    if existing_provider and existing_provider != "authelia":
+        return
+    auth["mode"] = "oidc"
+    for key, value in sidecar.items():
+        if key == "managed":
+            continue
+        if _blank(oidc.get(key)):
+            oidc[key] = value
+    oidc.setdefault("provider", "authelia")
+
+
 def load_config(path: Path = DEPLOY_PATH) -> dict:
     if not path.exists():
         raise FileNotFoundError(
             f"Missing {path.name}. Copy deploy.yaml.example to deploy.yaml or run wizard.sh."
         )
-    return load_yaml(path)
+    config = load_yaml(path)
+    apply_engine_oidc_sidecar(config)
+    return config
 
 
 def validate_config(config: dict) -> None:

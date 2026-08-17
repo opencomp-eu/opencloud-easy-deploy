@@ -85,6 +85,8 @@ identity_providers:
 
 Re-run `bash apply.sh` in authelia-easy-deploy, then opencloud-easy-deploy, then easydeploy-engine.
 
+On a **same-VPS** engine install you can skip the Authelia client block: `bash wizard.sh` in easydeploy-engine clones this repo if needed and runs `wizard.sh`. See [easydeploy-engine README](../easydeploy-engine/README.md).
+
 Official reference: [Authelia — openCloud client](https://www.authelia.com/integration/openid-connect/clients/opencloud/)
 
 ## Apply order

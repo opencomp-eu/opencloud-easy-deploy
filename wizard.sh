@@ -7,6 +7,41 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/scripts/lib.sh"
 
 DEPLOY_YAML="${SCRIPT_DIR}/deploy.yaml"
+NO_APPLY=0
+PROXY_MODE=""
+
+usage() {
+	echo "Usage: bash wizard.sh [--from-engine] [--no-apply] [--proxy-mode standalone|integrate]"
+}
+
+while [[ $# -gt 0 ]]; do
+	case "$1" in
+		--help|-h)
+			usage
+			exit 0
+			;;
+		--from-engine)
+			NO_APPLY=1
+			PROXY_MODE="integrate"
+			shift
+			;;
+		--no-apply)
+			NO_APPLY=1
+			shift
+			;;
+		--proxy-mode)
+			PROXY_MODE="${2:-}"
+			shift 2
+			;;
+		--proxy-mode=*)
+			PROXY_MODE="${1#*=}"
+			shift
+			;;
+		*)
+			die "Unknown option: $1"
+			;;
+	esac
+done
 
 print_banner() {
 	echo
@@ -21,7 +56,8 @@ gather_config() {
 	local role_admin role_user role_guest
 	local weboffice_enabled weboffice_domain
 	local modules_search modules_antivirus modules_radicale modules_monitoring
-	local base_domain proceed proxy_mode
+	local base_domain proceed proxy_mode use_local_authelia oidc_provider
+	local authelia_deploy authelia_domain
 
 	print_banner
 	echo -e "  Press Enter to accept a ${CYAN}[default]${RESET}.\n"
@@ -33,10 +69,35 @@ gather_config() {
 
 	echo
 	echo -e "${BOLD}  Authentication${RESET}"
-	ask auth_mode "Auth mode: builtin or oidc" "builtin"
-	auth_mode="${auth_mode,,}"
-	if [[ "$auth_mode" != "builtin" && "$auth_mode" != "oidc" ]]; then
-		die "auth mode must be 'builtin' or 'oidc'"
+	authelia_deploy="$(cd "${SCRIPT_DIR}/.." && pwd)/authelia-easy-deploy/deploy.yaml"
+	use_local_authelia="n"
+	oidc_provider=""
+	if [[ -f "$authelia_deploy" ]]; then
+		ask_yn use_local_authelia "Use Authelia on this VPS as the OpenCloud IdP?" "y"
+	fi
+	if [[ "$use_local_authelia" == "y" ]]; then
+		auth_mode="oidc"
+		oidc_provider="authelia"
+		authelia_domain="$(uv run python - <<PY
+import yaml
+from pathlib import Path
+data = yaml.safe_load(Path(${authelia_deploy@Q}).read_text()) or {}
+print((data.get("authelia") or {}).get("domain") or "")
+PY
+)"
+		if [[ -z "$authelia_domain" ]]; then
+			die "Could not read authelia.domain from ${authelia_deploy}"
+		fi
+		oidc_issuer="https://${authelia_domain}"
+		oidc_account="https://${authelia_domain}/"
+		oidc_domain="$authelia_domain"
+		info "Using Authelia at https://${authelia_domain} (engine will register the OIDC client)."
+	else
+		ask auth_mode "Auth mode: builtin or oidc" "builtin"
+		auth_mode="${auth_mode,,}"
+		if [[ "$auth_mode" != "builtin" && "$auth_mode" != "oidc" ]]; then
+			die "auth mode must be 'builtin' or 'oidc'"
+		fi
 	fi
 
 	admin_password=""
@@ -44,17 +105,19 @@ gather_config() {
 		ask_secret admin_password "Admin password (leave empty to auto-generate on apply)"
 	fi
 
-	oidc_issuer=""
-	oidc_account=""
-	oidc_domain=""
 	oidc_client_id="opencloud"
 	role_admin="opencloud-admin"
 	role_user="opencloud-user"
 	role_guest="opencloud-guest"
+	if [[ "$use_local_authelia" != "y" ]]; then
+		oidc_issuer=""
+		oidc_account=""
+		oidc_domain=""
+	fi
 
-	if [[ "$auth_mode" == "oidc" ]]; then
+	if [[ "$auth_mode" == "oidc" && "$use_local_authelia" != "y" ]]; then
 		echo
-		echo -e "${BOLD}  External OIDC (Authentik, Keycloak, …)${RESET}"
+		echo -e "${BOLD}  External OIDC (Authentik, Keycloak, remote Authelia, …)${RESET}"
 		ask oidc_issuer "OIDC issuer URL" "https://authentik.${base_domain}/application/o/opencloud/"
 		ask oidc_account "Account settings URL" "https://authentik.${base_domain}/if/user/"
 		ask oidc_domain "IdP domain (for CSP)" "authentik.${base_domain}"
@@ -81,8 +144,16 @@ gather_config() {
 
 	echo
 	echo -e "${BOLD}  Reverse proxy${RESET}"
-	ask proxy_mode "Proxy mode: standalone or integrate" "standalone"
-	proxy_mode="${proxy_mode,,}"
+	if [[ -n "${PROXY_MODE}" ]]; then
+		proxy_mode="${PROXY_MODE,,}"
+		info "Proxy mode: ${proxy_mode} (set by easydeploy-engine)"
+	else
+		ask proxy_mode "Proxy mode: standalone or integrate" "$([[ "$use_local_authelia" == "y" ]] && echo integrate || echo standalone)"
+		proxy_mode="${proxy_mode,,}"
+	fi
+	if [[ "$proxy_mode" != "standalone" && "$proxy_mode" != "integrate" ]]; then
+		die "proxy mode must be 'standalone' or 'integrate'"
+	fi
 
 	echo
 	echo -e "${BOLD}  Summary${RESET}"
@@ -90,14 +161,18 @@ gather_config() {
 	if [[ "$weboffice_enabled" == "y" ]]; then
 		echo "  Euro Office:   https://${weboffice_domain}"
 	fi
-	echo "  Auth:          ${auth_mode}"
+	echo "  Auth:          ${auth_mode}${oidc_provider:+ (${oidc_provider})}"
 	echo "  Data root:     ${data_root}"
 	echo "  Proxy mode:    ${proxy_mode}"
 	echo
 	echo "  Ensure DNS A/AAAA records point to this server before continuing."
 	echo
 
-	ask_yn proceed "Write deploy.yaml and deploy now?" "y"
+	if [[ "${NO_APPLY}" == "1" ]]; then
+		ask_yn proceed "Write deploy.yaml?" "y"
+	else
+		ask_yn proceed "Write deploy.yaml and deploy now?" "y"
+	fi
 	[[ "$proceed" == "y" ]] || {
 		info "Cancelled."
 		exit 0
@@ -117,6 +192,7 @@ update_from_wizard(
     oidc_account_url=${oidc_account@Q} or None,
     oidc_domain=${oidc_domain@Q} or None,
     oidc_client_id=${oidc_client_id@Q} or None,
+    oidc_provider=${oidc_provider@Q} or None,
     role_admin=${role_admin@Q},
     role_user=${role_user@Q},
     role_guest=${role_guest@Q},
@@ -135,13 +211,12 @@ PY
 }
 
 main() {
-	if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
-		echo "Usage: bash wizard.sh"
-		exit 0
-	fi
-
 	bash "${SCRIPT_DIR}/ensure-dependencies.sh"
 	gather_config
+	if [[ "${NO_APPLY}" == "1" ]]; then
+		info "Skipping apply (--no-apply / --from-engine). easydeploy-engine will apply."
+		return 0
+	fi
 	bash "${SCRIPT_DIR}/apply.sh"
 }
 

@@ -42,6 +42,7 @@ def update_from_wizard(
     oidc_account_url: str | None,
     oidc_domain: str | None,
     oidc_client_id: str | None,
+    oidc_provider: str | None,
     role_admin: str,
     role_user: str,
     role_guest: str,
@@ -74,11 +75,16 @@ def update_from_wizard(
     config["auth"] = {
         "mode": auth_mode,
         "oidc": {
+            "provider": oidc_provider or "",
             "issuer_url": oidc_issuer or "",
             "account_url": oidc_account_url or "",
             "domain": oidc_domain or "",
             "client_id": oidc_client_id or "opencloud",
-            "client_scopes": "openid profile email offline_access",
+            "client_scopes": (
+                "openid profile email groups"
+                if (oidc_provider or "").lower() == "authelia"
+                else "openid profile email offline_access"
+            ),
             "role_claim": "groups",
             "role_mapping": {
                 "admin": role_admin,

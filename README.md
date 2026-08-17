@@ -9,7 +9,7 @@ This replaces the official test installer (`curl -L https://opencloud.eu/install
 **Requirements:** Linux VPS, Docker Compose v2, DNS pointing at the server, ports 80/443 open.
 
 ```bash
-git clone --recurse-submodules https://github.com/your-org/opencloud-easy-deploy.git
+git clone --recurse-submodules https://github.com/opencomp-eu/opencloud-easy-deploy.git
 cd opencloud-easy-deploy
 bash ensure-dependencies.sh   # Docker, uv, submodules, Python deps
 bash wizard.sh                # interactive: writes deploy.yaml and deploys
@@ -70,7 +70,7 @@ Uses OpenCloud's built-in LDAP. Admin password is generated on first `apply.sh` 
 
 Set `auth.mode: oidc` and configure `auth.oidc` in `deploy.yaml`. The stack adds `idm/external-idp.yml` plus a local overlay for role mapping via `proxy.yaml`.
 
-For **Authelia** on the same VPS (with easydeploy-engine), set `auth.oidc.provider: authelia` and follow [`docs/integrating-engine.md`](docs/integrating-engine.md).
+For **Authelia** on the same VPS, clone this repo on its own and run `bash wizard.sh`, or let [easydeploy-engine](../easydeploy-engine) clone both kits and run their wizards. See [`docs/integrating-engine.md`](docs/integrating-engine.md).
 
 #### Authentik setup
 
