@@ -23,6 +23,9 @@ from scripts.backup import (
 )
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(PROJECT_ROOT / "easydeploy-lib" / "python"))
+import hostfs  # noqa: E402
+
 COMPOSE_DIR = PROJECT_ROOT / "opencloud-compose"
 STATE_DIR = PROJECT_ROOT / ".opencloud-easy-deploy"
 SECRETS_PATH = STATE_DIR / "secrets.yaml"
@@ -343,6 +346,7 @@ def build_env_vars(config: dict, secrets: dict[str, str]) -> dict[str, str]:
         "OC_CONFIG_DIR": str(opencloud["config_dir"]),
         "OC_DATA_DIR": str(opencloud["data_dir"]),
         "OC_APPS_DIR": str(opencloud["apps_dir"]),
+        "OC_CONTAINER_UID_GID": "{0}:{1}".format(*hostfs.service_uid_gid(root_default=(1000, 1000))),
         "DEFAULT_LANGUAGE": str(opencloud.get("language") or "en"),
         "START_ADDITIONAL_SERVICES": build_additional_services(config),
     }
@@ -438,7 +442,7 @@ def bootstrap_ldap_tls(ldap_certs_dir: Path) -> None:
     if key_path.is_file() and cert_path.is_file():
         return
 
-    ldap_certs_dir.mkdir(parents=True, exist_ok=True)
+    ldap_certs_dir = hostfs.ensure_writable_directory(ldap_certs_dir)
     subprocess.run(
         [
             "openssl",
@@ -463,13 +467,12 @@ def bootstrap_ldap_tls(ldap_certs_dir: Path) -> None:
     )
     key_path.chmod(0o640)
     cert_path.chmod(0o644)
-    if os.geteuid() == 0:
-        try:
-            shutil.chown(key_path, BITNAMI_OPENLDAP_UID, BITNAMI_OPENLDAP_GID)
-            shutil.chown(cert_path, BITNAMI_OPENLDAP_UID, BITNAMI_OPENLDAP_GID)
-            shutil.chown(ldap_certs_dir, BITNAMI_OPENLDAP_UID, BITNAMI_OPENLDAP_GID)
-        except OSError:
-            key_path.chmod(0o644)
+    try:
+        hostfs.chown_path(key_path, BITNAMI_OPENLDAP_UID, BITNAMI_OPENLDAP_GID)
+        hostfs.chown_path(cert_path, BITNAMI_OPENLDAP_UID, BITNAMI_OPENLDAP_GID)
+        hostfs.chown_path(ldap_certs_dir, BITNAMI_OPENLDAP_UID, BITNAMI_OPENLDAP_GID)
+    except PermissionError:
+        key_path.chmod(0o644)
 
 
 def bootstrap_config(config: dict) -> None:
@@ -487,7 +490,7 @@ def bootstrap_config(config: dict) -> None:
         ldap_base / "ldap_certs",
         ldap_base / "ldap_data",
     ):
-        directory.mkdir(parents=True, exist_ok=True)
+        hostfs.ensure_writable_directory(directory)
 
     auth_mode = str((config.get("auth") or {}).get("mode") or "builtin").lower()
     if auth_mode == "oidc":
@@ -629,23 +632,25 @@ def fix_data_permissions(config: dict) -> None:
     config_dir = Path(str(opencloud["config_dir"]))
     ldap_base = config_dir.parent
     auth_mode = str((config.get("auth") or {}).get("mode") or "builtin").lower()
+    uid, gid = hostfs.service_uid_gid(root_default=(1000, 1000))
     paths = [
         config_dir,
         Path(str(opencloud["data_dir"])),
         Path(str(opencloud["apps_dir"])),
     ]
-    if os.geteuid() != 0:
-        return
     for path in paths:
         if path.exists():
-            shutil.chown(path, user=1000, group=1000)
+            try:
+                hostfs.chown_path(path, uid, gid)
+            except PermissionError:
+                pass
     if auth_mode == "oidc":
         for name in ("ldap_certs", "ldap_data"):
             path = ldap_base / name
             if path.exists():
                 try:
-                    shutil.chown(path, BITNAMI_OPENLDAP_UID, BITNAMI_OPENLDAP_GID)
-                except OSError:
+                    hostfs.chown_path(path, BITNAMI_OPENLDAP_UID, BITNAMI_OPENLDAP_GID)
+                except PermissionError:
                     pass
 
 
@@ -863,7 +868,7 @@ def main() -> None:
             no_reconcile_runtime=args.no_reconcile_runtime,
             rotate_secrets=args.rotate_secrets,
         )
-    except (FileNotFoundError, ValueError, RuntimeError, subprocess.CalledProcessError) as exc:
+    except (FileNotFoundError, ValueError, RuntimeError, subprocess.CalledProcessError, PermissionError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         sys.exit(1)
 

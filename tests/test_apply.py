@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import textwrap
 from pathlib import Path
 
@@ -153,6 +154,10 @@ def test_build_env_vars_production_defaults():
     assert env["EURO_OFFICE_DOMAIN"] == "eurooffice.test.example"
     assert env["EURO_OFFICE_JWT_SECRET"] == "jwt-secret"
     assert env["EURO_OFFICE_DATA_DIR"] == "/var/lib/opencloud/euro-office"
+    expected_uid_gid = (
+        "1000:1000" if os.geteuid() == 0 else f"{os.getuid()}:{os.getgid()}"
+    )
+    assert env["OC_CONTAINER_UID_GID"] == expected_uid_gid
     assert env["OCD_CADDYFILE"].endswith("/caddy/Caddyfile")
     assert "idm/external-idp.yml" not in env["COMPOSE_FILE"]
 

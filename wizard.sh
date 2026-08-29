@@ -6,6 +6,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib.sh
 source "${SCRIPT_DIR}/scripts/lib.sh"
 
+EASYDEPLOY_INVOKE_ARGS=("$@")
+clear_parent_python_env
+
 DEPLOY_YAML="${SCRIPT_DIR}/deploy.yaml"
 NO_APPLY=0
 PROXY_MODE=""
@@ -64,12 +67,13 @@ gather_config() {
 
 	print_banner
 	echo -e "  Press Enter to accept a ${CYAN}[default]${RESET}.\n"
+	print_data_dir_hint
 	cd "${SCRIPT_DIR}"
 
 	ask domain "OpenCloud domain (e.g. cloud.example.com)" "cloud.example.com"
 	base_domain="$(base_domain_from_host "$domain")"
 
-	ask data_root "Data root directory" "/var/lib/opencloud"
+	ask data_root "Data root directory" "$(default_data_dir opencloud)"
 
 	echo
 	echo -e "${BOLD}  Authentication${RESET}"
@@ -219,6 +223,7 @@ PY
 
 main() {
 	bash "${SCRIPT_DIR}/ensure-dependencies.sh"
+	ensure_docker_group_session "${EASYDEPLOY_INVOKE_ARGS[@]}"
 	cd "${SCRIPT_DIR}"
 	gather_config
 	if [[ "${NO_APPLY}" == "1" ]]; then
