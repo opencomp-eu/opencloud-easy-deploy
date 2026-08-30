@@ -61,9 +61,9 @@ gather_config() {
 	local role_admin role_user role_guest
 	local weboffice_enabled weboffice_domain
 	local modules_search modules_antivirus modules_radicale modules_monitoring
-	local base_domain proceed proxy_mode use_local_authelia oidc_provider
-	local authelia_domain default_idp
-	local LOCAL_AUTHELIA_DOMAIN="" LOCAL_AUTHELIA_DEPLOY=""
+	local base_domain proceed proxy_mode use_local_kanidm oidc_provider
+	local kanidm_domain default_idp
+	local LOCAL_KANIDM_DOMAIN="" LOCAL_KANIDM_DEPLOY=""
 
 	print_banner
 	echo -e "  Press Enter to accept a ${CYAN}[default]${RESET}.\n"
@@ -77,27 +77,27 @@ gather_config() {
 
 	echo
 	echo -e "${BOLD}  Authentication${RESET}"
-	eval "$(uv run python -m scripts.config_edit --print-local-authelia)"
-	use_local_authelia="n"
+	eval "$(uv run python -m scripts.config_edit --print-local-kanidm)"
+	use_local_kanidm="n"
 	oidc_provider=""
-	authelia_domain="${LOCAL_AUTHELIA_DOMAIN:-}"
-	if [[ -n "$authelia_domain" ]]; then
+	kanidm_domain="${LOCAL_KANIDM_DOMAIN:-}"
+	if [[ -n "$kanidm_domain" ]]; then
 		if [[ "${FROM_ENGINE}" == "1" ]]; then
-			use_local_authelia="y"
-			info "Using Authelia on this VPS at https://${authelia_domain}."
+			use_local_kanidm="y"
+			info "Using Kanidm on this VPS at https://${kanidm_domain}."
 		else
-			ask_yn use_local_authelia "Use Authelia at https://${authelia_domain} as the OpenCloud IdP?" "y"
+			ask_yn use_local_kanidm "Use Kanidm at https://${kanidm_domain} as the OpenCloud IdP?" "y"
 		fi
 	fi
-	if [[ "$use_local_authelia" == "y" ]]; then
-		if [[ -z "$authelia_domain" ]]; then
-			die "Authelia was selected but no portal domain was found."
+	if [[ "$use_local_kanidm" == "y" ]]; then
+		if [[ -z "$kanidm_domain" ]]; then
+			die "Kanidm was selected but no identity domain was found."
 		fi
 		auth_mode="oidc"
-		oidc_provider="authelia"
-		oidc_issuer="https://${authelia_domain}"
-		oidc_account="https://${authelia_domain}/"
-		oidc_domain="$authelia_domain"
+		oidc_provider="kanidm"
+		oidc_issuer="https://${kanidm_domain}/oauth2/openid/opencloud"
+		oidc_account="https://${kanidm_domain}/"
+		oidc_domain="$kanidm_domain"
 		info "OIDC issuer: ${oidc_issuer} (engine will register the OIDC client)."
 	else
 		ask auth_mode "Auth mode: builtin or oidc" "builtin"
@@ -116,22 +116,22 @@ gather_config() {
 	role_admin="opencloud-admin"
 	role_user="opencloud-user"
 	role_guest="opencloud-guest"
-	if [[ "$use_local_authelia" != "y" ]]; then
+	if [[ "$use_local_kanidm" != "y" ]]; then
 		oidc_issuer=""
 		oidc_account=""
 		oidc_domain=""
 	fi
 
-	if [[ "$auth_mode" == "oidc" && "$use_local_authelia" != "y" ]]; then
-		default_idp="${authelia_domain:-auth.${base_domain}}"
+	if [[ "$auth_mode" == "oidc" && "$use_local_kanidm" != "y" ]]; then
+		default_idp="${kanidm_domain:-idm.${base_domain}}"
 		echo
-		echo -e "${BOLD}  OIDC issuer (Authelia, Authentik, Keycloak, …)${RESET}"
-		echo "  Authelia issuer is the portal origin, e.g. https://auth.${base_domain}"
-		ask oidc_issuer "OIDC issuer URL" "https://${default_idp}"
+		echo -e "${BOLD}  OIDC issuer (Kanidm, Authentik, Keycloak, …)${RESET}"
+		echo "  Kanidm issuer is per-client, e.g. https://idm.${base_domain}/oauth2/openid/opencloud"
+		ask oidc_issuer "OIDC issuer URL" "https://${default_idp}/oauth2/openid/opencloud"
 		ask oidc_account "Account settings URL" "https://${default_idp}/"
 		ask oidc_domain "IdP domain (for CSP)" "${default_idp}"
 		ask oidc_client_id "OIDC client ID" "opencloud"
-		ask oidc_provider "Provider: authelia, authentik, keycloak, or other" "authelia"
+		ask oidc_provider "Provider: kanidm, authentik, keycloak, or other" "kanidm"
 		oidc_provider="${oidc_provider,,}"
 		ask role_admin "Admin group name" "opencloud-admin"
 		ask role_user "User group name" "opencloud-user"
@@ -159,7 +159,7 @@ gather_config() {
 		proxy_mode="${PROXY_MODE,,}"
 		info "Proxy mode: ${proxy_mode} (set by easydeploy-engine)"
 	else
-		ask proxy_mode "Proxy mode: standalone or integrate" "$([[ "$use_local_authelia" == "y" ]] && echo integrate || echo standalone)"
+		ask proxy_mode "Proxy mode: standalone or integrate" "$([[ "$use_local_kanidm" == "y" ]] && echo integrate || echo standalone)"
 		proxy_mode="${proxy_mode,,}"
 	fi
 	if [[ "$proxy_mode" != "standalone" && "$proxy_mode" != "integrate" ]]; then

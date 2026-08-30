@@ -70,7 +70,7 @@ Uses OpenCloud's built-in LDAP. Admin password is generated on first `apply.sh` 
 
 Set `auth.mode: oidc` and configure `auth.oidc` in `deploy.yaml`. The stack adds `idm/external-idp.yml` plus a local overlay for role mapping via `proxy.yaml`.
 
-For **Authelia** on the same VPS, clone this repo on its own and run `bash wizard.sh`, or let [easydeploy-engine](../easydeploy-engine) clone both kits and run their wizards. See [`docs/integrating-engine.md`](docs/integrating-engine.md).
+For **Kanidm** on the same VPS, clone this repo on its own and run `bash wizard.sh`, or let [easydeploy-engine](../easydeploy-engine) clone both kits and run their wizards. See [`docs/integrating-engine.md`](docs/integrating-engine.md).
 
 #### Authentik setup
 

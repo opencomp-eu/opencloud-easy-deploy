@@ -18,16 +18,16 @@ proxy:
     network: easydeploy-net
 
 # auth.mode: builtin — built-in LDAP admin (simple VPS default)
-# auth.mode: oidc   — Authelia (same VPS via easydeploy-engine) or another IdP
+# auth.mode: oidc   — Kanidm (same VPS via easydeploy-engine) or another IdP
 auth:
   mode: builtin
   oidc:
-    # provider: authelia  — adds idm/external-authelia.yml compose overlay when set
-    issuer_url: https://auth.example.com
-    account_url: https://auth.example.com/
-    domain: auth.example.com
+    # provider: kanidm  — adds overlays/idm/kanidm-provider.yml when set
+    issuer_url: https://idm.example.com/oauth2/openid/opencloud
+    account_url: https://idm.example.com/
+    domain: idm.example.com
     client_id: opencloud
-    client_scopes: "openid profile email offline_access"
+    client_scopes: "openid profile email groups groups_name"
     role_claim: groups
     role_mapping:
       admin: opencloud-admin

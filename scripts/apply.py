@@ -124,7 +124,7 @@ def apply_engine_oidc_sidecar(config: dict, sidecar_path: Path | None = None) ->
     if managed_is_false(oidc):
         return
     existing_provider = str(oidc.get("provider") or "").strip().lower()
-    if existing_provider and existing_provider != "authelia":
+    if existing_provider and existing_provider not in {"kanidm", "authelia"}:
         return
     auth["mode"] = "oidc"
     for key, value in sidecar.items():
@@ -132,7 +132,7 @@ def apply_engine_oidc_sidecar(config: dict, sidecar_path: Path | None = None) ->
             continue
         if _blank(oidc.get(key)):
             oidc[key] = value
-    oidc.setdefault("provider", "authelia")
+    oidc.setdefault("provider", "kanidm")
 
 
 def load_config(path: Path = DEPLOY_PATH) -> dict:
@@ -211,9 +211,8 @@ def derive_compose_files(config: dict) -> list[str]:
     if auth_mode == "oidc":
         files.extend(["idm/external-idp.yml", "../overlays/idm/oidc-external.yml"])
         provider = str((config.get("auth") or {}).get("oidc", {}).get("provider") or "").lower()
-        if provider == "authelia":
-            files.append("idm/external-authelia.yml")
-            files.append("../overlays/idm/authelia-provider.yml")
+        if provider in {"kanidm", "authelia"}:
+            files.append("../overlays/idm/kanidm-provider.yml")
 
     modules = config.get("modules") or {}
     if to_bool(modules.get("search")):
@@ -376,8 +375,8 @@ def build_env_vars(config: dict, secrets: dict[str, str]) -> dict[str, str]:
         role_mapping = oidc.get("role_mapping") or {}
         provider = str(oidc.get("provider") or "").lower()
         default_scopes = (
-            "openid profile email groups"
-            if provider == "authelia"
+            "openid profile email groups groups_name"
+            if provider in {"kanidm", "authelia"}
             else "openid profile email offline_access"
         )
         env.update(

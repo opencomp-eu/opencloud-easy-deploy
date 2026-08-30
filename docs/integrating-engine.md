@@ -1,6 +1,6 @@
 # Integrating with easydeploy-engine
 
-Use this when Authelia (or another kit) already runs on the same VPS behind **easydeploy-engine** on `easydeploy-net`.
+Use this when Kanidm already runs on the same VPS behind **easydeploy-engine** on `easydeploy-net`.
 
 ## deploy.yaml
 
@@ -18,12 +18,12 @@ opencloud:
 auth:
   mode: oidc
   oidc:
-    provider: authelia   # adds Authelia-specific compose overlay
-    issuer_url: https://auth.example.com
-    account_url: https://auth.example.com/
-    domain: auth.example.com
+    provider: kanidm   # adds Kanidm-specific compose overlay
+    issuer_url: https://idm.example.com/oauth2/openid/opencloud
+    account_url: https://idm.example.com/
+    domain: idm.example.com
     client_id: opencloud
-    client_scopes: openid profile email groups
+    client_scopes: openid profile email groups groups_name
     role_claim: groups
     role_mapping:
       admin: opencloud-admin
@@ -31,67 +31,19 @@ auth:
       guest: opencloud-guest
 ```
 
-## Authelia OIDC client
+Kanidm uses a **per-client** issuer (`/oauth2/openid/<client_id>`), not the portal origin.
+
+## Kanidm OIDC client
 
 OpenCloud's **browser** login uses a **public** OIDC client with PKCE (no client secret). The client ID must match `auth.oidc.client_id` in OpenCloud (`opencloud` above).
 
-In Authelia `deploy.yaml`:
+On a same-VPS engine install you can skip registering the client by hand: `bash wizard.sh` in easydeploy-engine clones this repo if needed and writes the Kanidm OIDC sidecar. Kanidm apply then creates the public client and default groups (`opencloud-admin`, `opencloud-user`, `opencloud-guest`).
 
-```yaml
-oidc:
-  enabled: true
-  clients:
-    - client_id: opencloud
-      client_name: OpenCloud
-      public: true
-      authorization_policy: two_factor
-      require_pkce: true
-      pkce_challenge_method: S256
-      token_endpoint_auth_method: none
-      redirect_uris:
-        - https://cloud.example.com/
-        - https://cloud.example.com/web-oidc-callback
-        - https://cloud.example.com/oidc-callback.html
-        - https://cloud.example.com/oidc-silent-redirect.html
-      scopes:
-        - openid
-        - offline_access
-        - groups
-        - profile
-        - email
-      grant_types:
-        - authorization_code
-        - refresh_token
-      response_types:
-        - code
-```
-
-Give your user the `opencloud-admin` group in Authelia `deploy.yaml` (`users:` section), not by editing `users_database.yml` directly.
-
-Authelia must also allow browser CORS for the token/userinfo endpoints (OpenCloud Web POSTs the auth code from `https://cloud…` to `https://auth…`). `apply.sh` in authelia-easy-deploy now writes this automatically:
-
-```yaml
-identity_providers:
-  oidc:
-    cors:
-      endpoints:
-        - authorization
-        - token
-        - revocation
-        - userinfo
-        - introspection
-      allowed_origins_from_client_redirect_uris: true
-```
-
-Re-run `bash apply.sh` in authelia-easy-deploy, then opencloud-easy-deploy, then easydeploy-engine.
-
-On a **same-VPS** engine install you can skip the Authelia client block: `bash wizard.sh` in easydeploy-engine clones this repo if needed and runs `wizard.sh`. See [easydeploy-engine README](../easydeploy-engine/README.md).
-
-Official reference: [Authelia — openCloud client](https://www.authelia.com/integration/openid-connect/clients/opencloud/)
+Give your user the `opencloud-admin` group in Kanidm, not by creating a local OpenCloud account.
 
 ## Apply order
 
-1. Engine + Authelia in integrate mode (see authelia-easy-deploy `docs/integrating-engine.md`).
+1. Engine + Kanidm in integrate mode (see kanidm-easy-deploy `docs/integrating-engine.md`).
 2. Clone/configure opencloud-easy-deploy; set `proxy.mode: integrate` and OIDC as above.
 3. `bash apply.sh` in opencloud-easy-deploy.
 4. Register OpenCloud in `engine.yaml` (fragment path `.opencloud-easy-deploy/integration/caddy.caddy`).

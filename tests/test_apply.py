@@ -61,22 +61,23 @@ def test_derive_compose_files_integrate_excludes_caddy():
     assert "docker-compose.yml" in files
 
 
-def test_derive_compose_files_oidc_authelia_provider():
+def test_derive_compose_files_oidc_kanidm_provider():
     config = _base_config(
         auth={
             "mode": "oidc",
             "oidc": {
-                "provider": "authelia",
-                "issuer_url": "https://auth.example/o",
-                "account_url": "https://auth.example/",
-                "domain": "auth.example",
+                "provider": "kanidm",
+                "issuer_url": "https://idm.example/oauth2/openid/opencloud",
+                "account_url": "https://idm.example/",
+                "domain": "idm.example",
                 "client_id": "opencloud",
             },
         },
     )
     files = derive_compose_files(config)
-    assert "idm/external-authelia.yml" in files
-    assert "../overlays/idm/authelia-provider.yml" in files
+    assert "idm/external-idp.yml" in files
+    assert "../overlays/idm/kanidm-provider.yml" in files
+    assert "idm/external-authelia.yml" not in files
 
 
 def test_render_integration_fragment(tmp_path, monkeypatch):
@@ -276,20 +277,20 @@ def test_bootstrap_ldap_tls_creates_cert_files(tmp_path):
 def test_apply_engine_oidc_sidecar_fills_blank_fields(tmp_path):
     sidecar = tmp_path / "oidc-provider.yaml"
     sidecar.write_text(
-        "provider: authelia\nissuer_url: https://auth.test.example\n"
-        "account_url: https://auth.test.example/\ndomain: auth.test.example\n"
+        "provider: kanidm\nissuer_url: https://idm.test.example/oauth2/openid/opencloud\n"
+        "account_url: https://idm.test.example/\ndomain: idm.test.example\n"
         "client_id: opencloud\n"
     )
     config = {"auth": {"mode": "builtin", "oidc": {}}}
     apply_engine_oidc_sidecar(config, sidecar)
     assert config["auth"]["mode"] == "oidc"
-    assert config["auth"]["oidc"]["issuer_url"] == "https://auth.test.example"
-    assert config["auth"]["oidc"]["provider"] == "authelia"
+    assert config["auth"]["oidc"]["issuer_url"] == "https://idm.test.example/oauth2/openid/opencloud"
+    assert config["auth"]["oidc"]["provider"] == "kanidm"
 
 
 def test_apply_engine_oidc_sidecar_respects_external_provider(tmp_path):
     sidecar = tmp_path / "oidc-provider.yaml"
-    sidecar.write_text("provider: authelia\nissuer_url: https://auth.test.example\n")
+    sidecar.write_text("provider: kanidm\nissuer_url: https://idm.test.example/oauth2/openid/opencloud\n")
     config = {"auth": {"mode": "oidc", "oidc": {"provider": "keycloak", "issuer_url": "https://idp.example"}}}
     apply_engine_oidc_sidecar(config, sidecar)
     assert config["auth"]["oidc"]["issuer_url"] == "https://idp.example"
