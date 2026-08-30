@@ -43,10 +43,14 @@ Give your user the `opencloud-admin` group in Kanidm, not by creating a local Op
 
 ## Apply order
 
-1. Engine + Kanidm in integrate mode (see kanidm-easy-deploy `docs/integrating-engine.md`).
-2. Clone/configure opencloud-easy-deploy; set `proxy.mode: integrate` and OIDC as above.
-3. `bash apply.sh` in opencloud-easy-deploy.
-4. Register OpenCloud in `engine.yaml` (fragment path `.opencloud-easy-deploy/integration/caddy.caddy`).
+1. Configure Kanidm and OpenCloud, then enable both in `engine.yaml`.
+2. Run `bash apply.sh` in easydeploy-engine.
+3. The engine writes both OIDC sidecars, applies Kanidm to register the
+   `opencloud` client, applies OpenCloud to consume the provider configuration,
+   and reloads shared Caddy.
+
+Do not use `--skip-kits` for the initial identity wiring: that writes sidecars
+but does not register the client or restart OpenCloud.
 5. `bash apply.sh` in easydeploy-engine.
 
 Standalone OpenCloud Caddy (`opencloud_caddy`) is not started in integrate mode.

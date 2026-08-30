@@ -110,7 +110,12 @@ def managed_is_false(section: dict | None) -> bool:
 
 
 def apply_engine_oidc_sidecar(config: dict, sidecar_path: Path | None = None) -> None:
-    """Merge engine-generated Authelia OIDC settings. Operator deploy.yaml wins when set."""
+    """Apply engine-managed Kanidm OIDC settings.
+
+    When management is enabled, the engine sidecar is authoritative. This
+    prevents example or stale issuer values in deploy.yaml from overriding the
+    currently wired Kanidm instance. Set auth.oidc.managed: false to opt out.
+    """
     path = sidecar_path or (INTEGRATION_DIR / "oidc-provider.yaml")
     if not path.is_file():
         return
@@ -130,9 +135,8 @@ def apply_engine_oidc_sidecar(config: dict, sidecar_path: Path | None = None) ->
     for key, value in sidecar.items():
         if key == "managed":
             continue
-        if _blank(oidc.get(key)):
-            oidc[key] = value
-    oidc.setdefault("provider", "kanidm")
+        oidc[key] = value
+    oidc["provider"] = "kanidm"
 
 
 def load_config(path: Path = DEPLOY_PATH) -> dict:
@@ -798,7 +802,10 @@ def print_summary(config: dict) -> None:
     else:
         oidc = config["auth"]["oidc"]
         print()
-        print("OIDC auth: configure your IdP with these redirect URIs (strict):")
+        print(f"OIDC provider: {oidc.get('provider') or 'external'}")
+        print(f"OIDC issuer:   {oidc.get('issuer_url')}")
+        print(f"OIDC client:   {oidc.get('client_id')}")
+        print("OIDC redirect URIs (strict):")
         print(f"  - https://{domain}/")
         print(f"  - https://{domain}/web-oidc-callback")
         print(f"  - https://{domain}/oidc-callback.html")

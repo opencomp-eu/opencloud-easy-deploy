@@ -288,6 +288,35 @@ def test_apply_engine_oidc_sidecar_fills_blank_fields(tmp_path):
     assert config["auth"]["oidc"]["provider"] == "kanidm"
 
 
+def test_apply_engine_oidc_sidecar_replaces_stale_managed_values(tmp_path):
+    sidecar = tmp_path / "oidc-provider.yaml"
+    sidecar.write_text(
+        "provider: kanidm\n"
+        "issuer_url: https://auth.test.example/oauth2/openid/opencloud\n"
+        "account_url: https://auth.test.example/\n"
+        "domain: auth.test.example\n"
+        "client_id: opencloud\n"
+    )
+    config = {
+        "auth": {
+            "mode": "builtin",
+            "oidc": {
+                "provider": "kanidm",
+                "issuer_url": "https://idm.example.com/oauth2/openid/opencloud",
+                "domain": "idm.example.com",
+                "client_id": "old-client",
+            },
+        }
+    }
+    apply_engine_oidc_sidecar(config, sidecar)
+    assert config["auth"]["mode"] == "oidc"
+    assert config["auth"]["oidc"]["issuer_url"] == (
+        "https://auth.test.example/oauth2/openid/opencloud"
+    )
+    assert config["auth"]["oidc"]["domain"] == "auth.test.example"
+    assert config["auth"]["oidc"]["client_id"] == "opencloud"
+
+
 def test_apply_engine_oidc_sidecar_respects_external_provider(tmp_path):
     sidecar = tmp_path / "oidc-provider.yaml"
     sidecar.write_text("provider: kanidm\nissuer_url: https://idm.test.example/oauth2/openid/opencloud\n")
