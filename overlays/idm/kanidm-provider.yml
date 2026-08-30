@@ -12,8 +12,14 @@ services:
       PROXY_AUTOPROVISION_CLAIM_EMAIL: "email"
       PROXY_AUTOPROVISION_CLAIM_DISPLAYNAME: "name"
       PROXY_AUTOPROVISION_CLAIM_GROUPS: "groups"
-      PROXY_ROLE_ASSIGNMENT_DRIVER: "oidc"
-      GRAPH_ASSIGN_DEFAULT_USER_ROLE: "false"
+      # Kanidm custom claims (opencloudRoles) often never reach the access token
+      # or UserInfo. The oidc driver then lands on /access-denied. Assign the
+      # built-in user role at login; OC_ADMIN_USER_ID still promotes the operator.
+      PROXY_ROLE_ASSIGNMENT_DRIVER: "default"
+      GRAPH_ASSIGN_DEFAULT_USER_ROLE: "true"
+      SETTINGS_SETUP_DEFAULT_ASSIGNMENTS: "true"
+      OC_ADMIN_USER_ID: ${OC_ADMIN_USER_ID:-}
+      OC_LDAP_DISABLE_USER_MECHANISM: "none"
       WEBFINGER_WEB_OIDC_CLIENT_ID: ${OC_OIDC_CLIENT_ID}
       WEBFINGER_WEB_OIDC_CLIENT_SCOPES: "openid profile email groups groups_name"
       WEB_OIDC_SCOPE: "openid profile email groups groups_name"

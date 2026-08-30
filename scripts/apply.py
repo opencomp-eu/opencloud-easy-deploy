@@ -109,6 +109,38 @@ def managed_is_false(section: dict | None) -> bool:
     return str(value or "").strip().lower() in {"false", "no", "0"}
 
 
+def oidc_provider(config: dict) -> str:
+    oidc = (config.get("auth") or {}).get("oidc") or {}
+    return str(oidc.get("provider") or "").strip().lower()
+
+
+def ldap_data_dir(config: dict) -> Path:
+    return Path(str(config["opencloud"]["config_dir"])).parent / "ldap_data"
+
+
+def opencloud_admin_user_id(config: dict) -> str:
+    """Kanidm prefer-short-username → OpenCloud username is the person name (thomas)."""
+    oidc = (config.get("auth") or {}).get("oidc") or {}
+    explicit = str(oidc.get("admin_user") or "").strip()
+    if explicit:
+        return explicit
+    sibling = PROJECT_ROOT.parent / "kanidm-easy-deploy" / "deploy.yaml"
+    if not sibling.is_file():
+        return ""
+    try:
+        kanidm_cfg = load_yaml(sibling)
+    except (OSError, ValueError):
+        return ""
+    for user in kanidm_cfg.get("users") or []:
+        if not isinstance(user, dict):
+            continue
+        username = str(user.get("username") or "").strip()
+        groups = [str(item).strip() for item in (user.get("groups") or [])]
+        if username and "opencloud-admin" in groups:
+            return username
+    return ""
+
+
 def apply_engine_oidc_sidecar(config: dict, sidecar_path: Path | None = None) -> None:
     """Apply engine-managed Kanidm OIDC settings.
 
@@ -379,7 +411,7 @@ def build_env_vars(config: dict, secrets: dict[str, str]) -> dict[str, str]:
 
     if auth_mode == "oidc":
         role_mapping = oidc.get("role_mapping") or {}
-        provider = str(oidc.get("provider") or "").lower()
+        provider = oidc_provider(config)
         default_scopes = (
             "openid profile email groups groups_name"
             if provider == "kanidm"
@@ -387,11 +419,12 @@ def build_env_vars(config: dict, secrets: dict[str, str]) -> dict[str, str]:
             if provider == "authelia"
             else "openid profile email offline_access"
         )
+        kanidm = provider == "kanidm"
         env.update(
             {
                 "LDAP_BIND_PASSWORD": secrets["LDAP_BIND_PASSWORD"],
-                "PROXY_ROLE_ASSIGNMENT_DRIVER": "oidc",
-                "GRAPH_ASSIGN_DEFAULT_USER_ROLE": "false",
+                "PROXY_ROLE_ASSIGNMENT_DRIVER": "default" if kanidm else "oidc",
+                "GRAPH_ASSIGN_DEFAULT_USER_ROLE": "true" if kanidm else "false",
                 "IDP_DOMAIN": str(oidc["domain"]),
                 "IDP_ISSUER_URL": str(oidc["issuer_url"]),
                 "IDP_ACCOUNT_URL": str(oidc["account_url"]),
@@ -406,6 +439,10 @@ def build_env_vars(config: dict, secrets: dict[str, str]) -> dict[str, str]:
                 "OC_SHARING_PUBLIC_WRITEABLE_SHARE_MUST_HAVE_PASSWORD": "false",
             }
         )
+        if kanidm:
+            env["OC_ADMIN_USER_ID"] = opencloud_admin_user_id(config)
+            env["SETTINGS_SETUP_DEFAULT_ASSIGNMENTS"] = "true"
+            env["OC_LDAP_DISABLE_USER_MECHANISM"] = "none"
         env["_ROLE_MAPPING"] = yaml.safe_dump(role_mapping, default_flow_style=True)
 
     return env
@@ -523,6 +560,50 @@ def bootstrap_config(config: dict) -> None:
             shutil.copy2(euro_registry, euro_target)
 
 
+def build_proxy_role_block(config: dict) -> str:
+    oidc = (config.get("auth") or {}).get("oidc") or {}
+    if oidc_provider(config) == "kanidm":
+        return "role_assignment:\n  driver: default\n"
+    role_mapping = oidc.get("role_mapping") or {}
+    return render_template(
+        PROXY_ROLE_TEMPLATE.read_text(),
+        {
+            "ROLE_CLAIM": str(oidc.get("role_claim") or "groups"),
+            "ROLE_ADMIN": str(role_mapping.get("admin") or "opencloud-admin"),
+            "ROLE_USER": str(role_mapping.get("user") or "opencloud-user"),
+            "ROLE_GUEST": str(role_mapping.get("guest") or "opencloud-guest"),
+        },
+    )
+
+
+def wipe_local_oidc_accounts(config: dict) -> None:
+    """Drop OpenCloud's bundled OpenLDAP DB (autoprovisioned users). Does not touch Kanidm."""
+    data = ldap_data_dir(config)
+    env_path = COMPOSE_DIR / ".env"
+    env: dict[str, str] = {}
+    if env_path.is_file():
+        for line in env_path.read_text().splitlines():
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            env[key.strip()] = value.strip()
+    print("Stopping OpenCloud + bundled LDAP to wipe local accounts…")
+    try:
+        run_compose(COMPOSE_DIR, "stop", "opencloud", "ldap-server", env=env)
+    except subprocess.CalledProcessError:
+        for name in ("opencloud", "opencloud-ldap-server-1", "ldap-server"):
+            subprocess.run(["docker", "stop", name], check=False, capture_output=True)
+    if data.is_dir():
+        for child in data.iterdir():
+            if child.is_dir():
+                shutil.rmtree(child)
+            else:
+                child.unlink()
+        print(f"  Wiped bundled LDAP data at {data}")
+    else:
+        print(f"  No bundled LDAP data at {data}")
+
+
 def render_proxy_yaml(config: dict) -> None:
     config_dir = Path(str(config["opencloud"]["config_dir"]))
     proxy_path = config_dir / "proxy.yaml"
@@ -532,17 +613,7 @@ def render_proxy_yaml(config: dict) -> None:
     upstream_body = upstream_proxy.read_text() if upstream_proxy.is_file() else ""
 
     if auth_mode == "oidc":
-        oidc = config["auth"]["oidc"]
-        role_mapping = oidc.get("role_mapping") or {}
-        role_block = render_template(
-            PROXY_ROLE_TEMPLATE.read_text(),
-            {
-                "ROLE_CLAIM": str(oidc.get("role_claim") or "groups"),
-                "ROLE_ADMIN": str(role_mapping.get("admin") or "opencloud-admin"),
-                "ROLE_USER": str(role_mapping.get("user") or "opencloud-user"),
-                "ROLE_GUEST": str(role_mapping.get("guest") or "opencloud-guest"),
-            },
-        )
+        role_block = build_proxy_role_block(config)
         proxy_path.write_text(f"{role_block.rstrip()}\n{upstream_body.lstrip()}")
         render_csp_yaml(config)
     elif not proxy_path.exists():
@@ -829,11 +900,15 @@ def apply(
     *,
     no_reconcile_runtime: bool = False,
     rotate_secrets: bool = False,
+    wipe_local_accounts: bool = False,
 ) -> None:
     check_docker_available()
     config = load_config()
     validate_config(config)
     ensure_compose_submodule()
+
+    if wipe_local_accounts:
+        wipe_local_oidc_accounts(config)
 
     secret_values = create_or_update_secrets(config, rotate=rotate_secrets)
     bootstrap_config(config)
@@ -871,12 +946,18 @@ def main() -> None:
         action="store_true",
         help="Regenerate all secrets (destructive)",
     )
+    parser.add_argument(
+        "--wipe-local-accounts",
+        action="store_true",
+        help="Wipe OpenCloud bundled OpenLDAP users (not Kanidm) before apply",
+    )
     args = parser.parse_args()
 
     try:
         apply(
             no_reconcile_runtime=args.no_reconcile_runtime,
             rotate_secrets=args.rotate_secrets,
+            wipe_local_accounts=args.wipe_local_accounts,
         )
     except (FileNotFoundError, ValueError, RuntimeError, subprocess.CalledProcessError, PermissionError) as exc:
         print(f"Error: {exc}", file=sys.stderr)

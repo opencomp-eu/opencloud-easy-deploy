@@ -39,7 +39,7 @@ OpenCloud's **browser** login uses a **public** OIDC client with PKCE (no client
 
 On a same-VPS engine install you can skip registering the client by hand: `bash wizard.sh` in easydeploy-engine clones this repo if needed and writes the Kanidm OIDC sidecar. Kanidm apply then creates the public client and default groups (`opencloud-admin`, `opencloud-user`, `opencloud-guest`).
 
-Give your user the `opencloud-admin` group in Kanidm, not by creating a local OpenCloud account.
+Give your user the `opencloud-admin` group in Kanidm, not by creating a local OpenCloud account. OpenCloud's bundled OpenLDAP is only the local graph store; wipe it with `bash apply.sh --wipe-local-accounts` if a failed first login left a conflicting user (`/access-denied` after a successful Kanidm grant).
 
 ## Apply order
 

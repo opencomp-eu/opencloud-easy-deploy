@@ -13,7 +13,10 @@ from scripts.apply import (
     apply_engine_oidc_sidecar,
     bootstrap_ldap_tls,
     build_env_vars,
+    build_proxy_role_block,
     derive_compose_files,
+    ldap_data_dir,
+    opencloud_admin_user_id,
     render_caddyfile,
     render_network_overlay,
     render_template,
@@ -185,6 +188,7 @@ def test_build_env_vars_oidc():
     }
     env = build_env_vars(config, secrets)
     assert env["PROXY_ROLE_ASSIGNMENT_DRIVER"] == "oidc"
+    assert env["GRAPH_ASSIGN_DEFAULT_USER_ROLE"] == "false"
     assert env["IDP_ISSUER_URL"] == "https://idp.example/o/opencloud/"
     assert "idm/external-idp.yml" in env["COMPOSE_FILE"]
 
@@ -214,8 +218,58 @@ def test_build_env_vars_kanidm_uses_groups_name_scopes():
     )
     assert env["OC_OIDC_CLIENT_SCOPES"] == "openid profile email groups groups_name"
     assert env["PROXY_ROLE_ASSIGNMENT_OIDC_CLAIM"] == "opencloudRoles"
+    assert env["PROXY_ROLE_ASSIGNMENT_DRIVER"] == "default"
+    assert env["GRAPH_ASSIGN_DEFAULT_USER_ROLE"] == "true"
+    assert env["OC_LDAP_DISABLE_USER_MECHANISM"] == "none"
     assert "../overlays/idm/kanidm-provider.yml" in env["COMPOSE_FILE"]
     assert "../overlays/idm/authelia-provider.yml" not in env["COMPOSE_FILE"]
+
+
+def test_build_proxy_role_block_kanidm_uses_default_driver():
+    config = _base_config(
+        auth={
+            "mode": "oidc",
+            "oidc": {
+                "provider": "kanidm",
+                "role_claim": "opencloudRoles",
+                "role_mapping": {"admin": "admin"},
+            },
+        }
+    )
+    block = build_proxy_role_block(config)
+    assert "driver: default" in block
+    assert "oidc_role_mapper" not in block
+
+
+def test_opencloud_admin_user_id_from_sibling_kanidm(tmp_path, monkeypatch):
+    from scripts import apply as apply_module
+
+    sibling = tmp_path / "kanidm-easy-deploy"
+    sibling.mkdir()
+    (sibling / "deploy.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "users": [
+                    {"username": "thomas", "groups": ["opencloud-admin", "mail-users"]},
+                ]
+            }
+        )
+    )
+    monkeypatch.setattr(apply_module, "PROJECT_ROOT", tmp_path / "opencloud-easy-deploy")
+    config = _base_config(auth={"mode": "oidc", "oidc": {"provider": "kanidm"}})
+    assert opencloud_admin_user_id(config) == "thomas"
+
+
+def test_opencloud_admin_user_id_explicit_wins():
+    config = _base_config(
+        auth={"mode": "oidc", "oidc": {"provider": "kanidm", "admin_user": "operator"}}
+    )
+    assert opencloud_admin_user_id(config) == "operator"
+
+
+def test_ldap_data_dir_is_sibling_of_config():
+    config = _base_config()
+    assert ldap_data_dir(config) == Path("/var/lib/opencloud/ldap_data")
 
 
 def test_render_proxy_role_template():
