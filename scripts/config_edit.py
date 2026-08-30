@@ -128,7 +128,9 @@ def update_from_wizard(
             "client_id": oidc_client_id or "opencloud",
             "client_scopes": (
                 "openid profile email groups groups_name"
-                if (oidc_provider or "").lower() in {"kanidm", "authelia"}
+                if (oidc_provider or "").lower() == "kanidm"
+                else "openid profile email groups"
+                if (oidc_provider or "").lower() == "authelia"
                 else "openid profile email offline_access"
             ),
             "role_claim": "groups",

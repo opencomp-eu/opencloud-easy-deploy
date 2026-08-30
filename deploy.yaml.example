@@ -28,6 +28,7 @@ auth:
     domain: idm.example.com
     client_id: opencloud
     client_scopes: "openid profile email groups groups_name"
+    # Engine-managed Kanidm uses role_claim: opencloudRoles (admin/user/guest).
     role_claim: groups
     role_mapping:
       admin: opencloud-admin

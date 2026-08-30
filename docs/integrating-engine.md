@@ -24,11 +24,11 @@ auth:
     domain: idm.example.com
     client_id: opencloud
     client_scopes: openid profile email groups groups_name
-    role_claim: groups
+    role_claim: opencloudRoles
     role_mapping:
-      admin: opencloud-admin
-      user: opencloud-user
-      guest: opencloud-guest
+      admin: admin
+      user: user
+      guest: guest
 ```
 
 Kanidm uses a **per-client** issuer (`/oauth2/openid/<client_id>`), not the portal origin.

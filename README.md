@@ -131,7 +131,7 @@ Internet → Caddy (:443, Let's Encrypt)
 opencloud-compose stack (docker network: opencloud-net)
   ├── opencloud
   ├── euro-office (optional)
-  ├── ldap-server (OIDC mode only)
+  ├── ldap-server (OIDC mode only — OpenCloud's local user/graph store, not the IdP)
   └── optional modules (tika, clamav, …)
 ```
 

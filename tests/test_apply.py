@@ -77,6 +77,7 @@ def test_derive_compose_files_oidc_kanidm_provider():
     files = derive_compose_files(config)
     assert "idm/external-idp.yml" in files
     assert "../overlays/idm/kanidm-provider.yml" in files
+    assert "../overlays/idm/authelia-provider.yml" not in files
     assert "idm/external-authelia.yml" not in files
 
 
@@ -186,6 +187,35 @@ def test_build_env_vars_oidc():
     assert env["PROXY_ROLE_ASSIGNMENT_DRIVER"] == "oidc"
     assert env["IDP_ISSUER_URL"] == "https://idp.example/o/opencloud/"
     assert "idm/external-idp.yml" in env["COMPOSE_FILE"]
+
+
+def test_build_env_vars_kanidm_uses_groups_name_scopes():
+    config = _base_config(
+        auth={
+            "mode": "oidc",
+            "oidc": {
+                "provider": "kanidm",
+                "issuer_url": "https://idm.example/oauth2/openid/opencloud",
+                "account_url": "https://idm.example/",
+                "domain": "idm.example",
+                "client_id": "opencloud",
+                "role_claim": "opencloudRoles",
+                "role_mapping": {"admin": "admin", "user": "user", "guest": "guest"},
+            },
+        }
+    )
+    env = build_env_vars(
+        config,
+        {
+            "INITIAL_ADMIN_PASSWORD": "x",
+            "EURO_OFFICE_JWT_SECRET": "y",
+            "LDAP_BIND_PASSWORD": "z",
+        },
+    )
+    assert env["OC_OIDC_CLIENT_SCOPES"] == "openid profile email groups groups_name"
+    assert env["PROXY_ROLE_ASSIGNMENT_OIDC_CLAIM"] == "opencloudRoles"
+    assert "../overlays/idm/kanidm-provider.yml" in env["COMPOSE_FILE"]
+    assert "../overlays/idm/authelia-provider.yml" not in env["COMPOSE_FILE"]
 
 
 def test_render_proxy_role_template():

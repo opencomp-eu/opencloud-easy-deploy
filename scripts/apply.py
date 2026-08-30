@@ -215,8 +215,10 @@ def derive_compose_files(config: dict) -> list[str]:
     if auth_mode == "oidc":
         files.extend(["idm/external-idp.yml", "../overlays/idm/oidc-external.yml"])
         provider = str((config.get("auth") or {}).get("oidc", {}).get("provider") or "").lower()
-        if provider in {"kanidm", "authelia"}:
+        if provider == "kanidm":
             files.append("../overlays/idm/kanidm-provider.yml")
+        elif provider == "authelia":
+            files.append("../overlays/idm/authelia-provider.yml")
 
     modules = config.get("modules") or {}
     if to_bool(modules.get("search")):
@@ -380,7 +382,9 @@ def build_env_vars(config: dict, secrets: dict[str, str]) -> dict[str, str]:
         provider = str(oidc.get("provider") or "").lower()
         default_scopes = (
             "openid profile email groups groups_name"
-            if provider in {"kanidm", "authelia"}
+            if provider == "kanidm"
+            else "openid profile email groups"
+            if provider == "authelia"
             else "openid profile email offline_access"
         )
         env.update(
