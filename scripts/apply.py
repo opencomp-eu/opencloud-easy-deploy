@@ -36,7 +36,9 @@ INTEGRATION_DIR = STATE_DIR / "integration"
 INTEGRATION_CADDY_FRAGMENT = INTEGRATION_DIR / "caddy.caddy"
 DEFAULT_INTEGRATE_NETWORK = "easydeploy-net"
 BITNAMI_OPENLDAP_UID = 1001
-BITNAMI_OPENLDAP_GID = 1001
+# Bitnami OpenLDAP runs as uid 1001 and needs gid 0 to write slapd.ldif
+# into the bind-mounted /opt/bitnami/openldap/share (our ldap_certs dir).
+BITNAMI_OPENLDAP_GID = 0
 CADDY_DIR = PROJECT_ROOT / "caddy"
 CADDY_TEMPLATE = CADDY_DIR / "Caddyfile.template"
 CADDYFILE = CADDY_DIR / "Caddyfile"
@@ -281,8 +283,41 @@ def _network_address(net: dict) -> str:
     return ""
 
 
+def _ldap_ip_from_network(network: str = "opencloud-net") -> str:
+    """Address Docker actually assigned on the bridge — not a stale inspect cache."""
+    result = subprocess.run(
+        ["docker", "network", "inspect", network],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0 or not (result.stdout or "").strip():
+        return ""
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return ""
+    if not isinstance(payload, list) or not payload:
+        return ""
+    containers = payload[0].get("Containers") or {}
+    if not isinstance(containers, dict):
+        return ""
+    for info in containers.values():
+        if not isinstance(info, dict):
+            continue
+        name = str(info.get("Name") or "")
+        if name not in LDAP_CONTAINER_CANDIDATES and not name.endswith("ldap-server"):
+            continue
+        raw = str(info.get("IPv4Address") or "").split("/", 1)[0].strip()
+        if raw and raw.lower() not in {"invalid ip", "<nil>", "0.0.0.0"}:
+            return raw
+    return ""
+
+
 def discover_ldap_server_ip() -> str:
-    """Return the bundled LDAP container IP, or empty if it is not running."""
+    """Return the bundled LDAP IPv4 on opencloud-net, or empty if it is not attached."""
+    from_bridge = _ldap_ip_from_network("opencloud-net")
+    if from_bridge:
+        return from_bridge
     for name in LDAP_CONTAINER_CANDIDATES:
         result = subprocess.run(
             ["docker", "inspect", name],
@@ -306,21 +341,6 @@ def discover_ldap_server_ip() -> str:
             if address:
                 return address
     return ""
-
-
-def pin_ldap_hosts_in_container(ip: str) -> None:
-    """Bypass Docker DNS: write ldap-server into the running container /etc/hosts."""
-    if not ip:
-        return
-    script = (
-        f"sed -i '/[[:space:]]ldap-server$/d' /etc/hosts; "
-        f"echo '{ip} ldap-server' >> /etc/hosts"
-    )
-    subprocess.run(
-        ["docker", "exec", "-u", "0", "opencloud", "sh", "-c", script],
-        check=False,
-        capture_output=True,
-    )
 
 
 def render_network_overlay(config: dict, ldap_ip: str = "") -> None:
@@ -792,13 +812,25 @@ def fix_data_permissions(config: dict) -> None:
             except PermissionError:
                 pass
     if auth_mode == "oidc":
-        for name in ("ldap_certs", "ldap_data"):
-            path = ldap_base / name
-            if path.exists():
-                try:
-                    hostfs.chown_path(path, BITNAMI_OPENLDAP_UID, BITNAMI_OPENLDAP_GID)
-                except PermissionError:
-                    pass
+        ensure_bitnami_ldap_permissions(ldap_base)
+
+
+def ensure_bitnami_ldap_permissions(ldap_base: Path) -> None:
+    """Bitnami must create slapd.ldif in ldap_certs (mounted as .../share)."""
+    owner = f"{BITNAMI_OPENLDAP_UID}:{BITNAMI_OPENLDAP_GID}"
+    for name in ("ldap_certs", "ldap_data"):
+        path = ldap_base / name
+        path.mkdir(parents=True, exist_ok=True)
+        try:
+            os.chmod(path, 0o775)
+        except OSError:
+            pass
+        try:
+            hostfs.chown_path(path, BITNAMI_OPENLDAP_UID, BITNAMI_OPENLDAP_GID)
+        except PermissionError:
+            pass
+        subprocess.run(["sudo", "-n", "chown", "-R", owner, str(path)], check=False, capture_output=True)
+        subprocess.run(["sudo", "-n", "chmod", "0775", str(path)], check=False, capture_output=True)
 
 
 def docker_compose_cmd() -> list[str]:
@@ -940,11 +972,13 @@ def pin_ldap_server_after_up(config: dict, env: dict[str, str]) -> None:
             file=sys.stderr,
         )
         return
-    before = NETWORK_OVERLAY_PATH.read_text() if NETWORK_OVERLAY_PATH.is_file() else ""
+    uri = f"ldaps://{ip}:1636"
+    previous_uri = env.get("OC_LDAP_URI", "")
+    env["OC_LDAP_URI"] = uri
+    write_env_file(env, COMPOSE_DIR / ".env")
     render_network_overlay(config, ldap_ip=ip)
-    after = NETWORK_OVERLAY_PATH.read_text()
-    if before != after:
-        print(f"Pinning ldap-server → {ip} on opencloud-net (bypass Docker DNS)…")
+    if previous_uri != uri:
+        print(f"Pointing OpenCloud at {uri} (Docker /etc/hosts cannot be edited in-place)…")
         run_compose(
             COMPOSE_DIR,
             "up",
@@ -955,8 +989,7 @@ def pin_ldap_server_after_up(config: dict, env: dict[str, str]) -> None:
             env=env,
         )
     ensure_container_on_network("opencloud", "opencloud-net")
-    pin_ldap_hosts_in_container(ip)
-    print(f"  OpenCloud resolves ldap-server as {ip}")
+    print(f"  OpenCloud LDAP URI is {uri}")
 
 
 def reconcile_runtime(env_path: Path, config: dict) -> None:

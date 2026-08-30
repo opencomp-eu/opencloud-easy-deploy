@@ -381,26 +381,24 @@ def test_network_address_skips_invalid_placeholder():
     assert _network_address({"IPAddress": "", "GlobalIPv6Address": "fd00::7"}) == "fd00::7"
 
 
-def test_discover_ldap_server_ip_reads_inspect_json(monkeypatch):
-    inspect = [
+def test_discover_ldap_server_ip_reads_bridge_membership(monkeypatch):
+    payload = [
         {
-            "NetworkSettings": {
-                "Networks": {
-                    "opencloud-net": {"IPAddress": "172.20.0.9"},
-                }
+            "Containers": {
+                "abc": {"Name": "ldap-server", "IPv4Address": "172.21.0.9/16"},
             }
         }
     ]
 
     def fake_run(cmd, **_kwargs):
-        assert cmd[:2] == ["docker", "inspect"]
-        return type("R", (), {"returncode": 0, "stdout": json.dumps(inspect), "stderr": ""})()
+        assert cmd[:3] == ["docker", "network", "inspect"]
+        return type("R", (), {"returncode": 0, "stdout": json.dumps(payload), "stderr": ""})()
 
     monkeypatch.setattr("scripts.apply.subprocess.run", fake_run)
-    assert discover_ldap_server_ip() == "172.20.0.9"
+    assert discover_ldap_server_ip() == "172.21.0.9"
 
 
-def test_discover_ldap_server_ip_ignores_other_networks(monkeypatch):
+def test_discover_ldap_server_ip_falls_back_to_container_inspect(monkeypatch):
     inspect = [
         {
             "NetworkSettings": {
@@ -413,6 +411,8 @@ def test_discover_ldap_server_ip_ignores_other_networks(monkeypatch):
     ]
 
     def fake_run(cmd, **_kwargs):
+        if cmd[:3] == ["docker", "network", "inspect"]:
+            return type("R", (), {"returncode": 1, "stdout": "", "stderr": ""})()
         return type("R", (), {"returncode": 0, "stdout": json.dumps(inspect), "stderr": ""})()
 
     monkeypatch.setattr("scripts.apply.subprocess.run", fake_run)
