@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import secrets
 import shutil
@@ -267,7 +268,68 @@ def derive_compose_files(config: dict) -> list[str]:
     return files
 
 
-def render_network_overlay(config: dict) -> None:
+LDAP_CONTAINER_CANDIDATES = ("ldap-server", "opencloud-compose-ldap-server-1")
+
+
+def _network_address(net: dict) -> str:
+    ip = str(net.get("IPAddress") or "").strip()
+    if ip and ip.lower() not in {"invalid ip", "<nil>", "0.0.0.0"}:
+        return ip
+    ip6 = str(net.get("GlobalIPv6Address") or "").strip()
+    if ip6:
+        return ip6
+    return ""
+
+
+def discover_ldap_server_ip() -> str:
+    """Return the bundled LDAP container IP, or empty if it is not running."""
+    for name in LDAP_CONTAINER_CANDIDATES:
+        result = subprocess.run(
+            ["docker", "inspect", name],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0 or not (result.stdout or "").strip():
+            continue
+        try:
+            payload = json.loads(result.stdout)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(payload, list) or not payload:
+            continue
+        networks = (payload[0].get("NetworkSettings") or {}).get("Networks") or {}
+        if not isinstance(networks, dict):
+            continue
+        for net_name in ("opencloud-net", DEFAULT_INTEGRATE_NETWORK):
+            net = networks.get(net_name)
+            if isinstance(net, dict):
+                address = _network_address(net)
+                if address:
+                    return address
+        for net in networks.values():
+            if isinstance(net, dict):
+                address = _network_address(net)
+                if address:
+                    return address
+    return ""
+
+
+def pin_ldap_hosts_in_container(ip: str) -> None:
+    """Bypass Docker DNS: write ldap-server into the running container /etc/hosts."""
+    if not ip:
+        return
+    script = (
+        f"grep -qE '[[:space:]]ldap-server$' /etc/hosts || "
+        f"echo '{ip} ldap-server' >> /etc/hosts"
+    )
+    subprocess.run(
+        ["docker", "exec", "-u", "0", "opencloud", "sh", "-c", script],
+        check=False,
+        capture_output=True,
+    )
+
+
+def render_network_overlay(config: dict, ldap_ip: str = "") -> None:
     """Stable Docker DNS names and host-gateway routes for cross-stack proxy/WOPI."""
     opencloud_domain = str(config["opencloud"]["domain"])
     weboffice = config.get("weboffice") or {}
@@ -277,6 +339,8 @@ def render_network_overlay(config: dict) -> None:
     idp_domain = str(oidc.get("domain") or "").strip()
     if idp_domain and idp_domain != opencloud_domain:
         extra_hosts.append(f"{idp_domain}:host-gateway")
+    if ldap_ip:
+        extra_hosts.append(f"ldap-server:{ldap_ip}")
 
     opencloud_service: dict[str, Any] = {
         "container_name": "opencloud",
@@ -286,6 +350,20 @@ def render_network_overlay(config: dict) -> None:
         opencloud_service["networks"] = ["opencloud-net", DEFAULT_INTEGRATE_NETWORK]
 
     services: dict[str, Any] = {"opencloud": opencloud_service}
+
+    # Dual-homed OpenCloud (opencloud-net + easydeploy-net) makes Docker's
+    # embedded DNS SERVFAIL lookups for names that only exist on one network.
+    # Pin ldap-server via extra_hosts/links so the name never hits 127.0.0.11.
+    if str((config.get("auth") or {}).get("mode") or "").lower() == "oidc":
+        ldap_networks: list[str] = ["opencloud-net"]
+        if proxy_mode(config) == "integrate":
+            ldap_networks.append(DEFAULT_INTEGRATE_NETWORK)
+        services["ldap-server"] = {
+            "container_name": "ldap-server",
+            "networks": ldap_networks,
+        }
+        opencloud_service["depends_on"] = ["ldap-server"]
+        opencloud_service["links"] = ["ldap-server"]
 
     if to_bool(weboffice.get("enabled")):
         office_domain = str(weboffice.get("domain") or "")
@@ -820,6 +898,39 @@ def stop_opencloud_caddy() -> None:
         subprocess.run(["docker", "rm", "opencloud_caddy"], check=False)
 
 
+def pin_ldap_server_after_up(config: dict, env: dict[str, str]) -> None:
+    """After LDAP has an IP, bake ldap-server into OpenCloud extra_hosts and /etc/hosts."""
+    ip = discover_ldap_server_ip()
+    if not ip:
+        print("Recreating ldap-server — it has no usable address on opencloud-net…")
+        run_compose(COMPOSE_DIR, "up", "-d", "--force-recreate", "ldap-server", env=env)
+        time.sleep(2)
+        ip = discover_ldap_server_ip()
+    if not ip:
+        print(
+            "Warning: bundled ldap-server has no address yet; "
+            "OpenCloud will fail lookups for ldap-server.",
+            file=sys.stderr,
+        )
+        return
+    before = NETWORK_OVERLAY_PATH.read_text() if NETWORK_OVERLAY_PATH.is_file() else ""
+    render_network_overlay(config, ldap_ip=ip)
+    after = NETWORK_OVERLAY_PATH.read_text()
+    if before != after:
+        print(f"Pinning ldap-server → {ip} (Docker DNS is unusable from a dual-homed container)…")
+        run_compose(
+            COMPOSE_DIR,
+            "up",
+            "-d",
+            "--no-deps",
+            "--force-recreate",
+            "opencloud",
+            env=env,
+        )
+    pin_ldap_hosts_in_container(ip)
+    print(f"  OpenCloud resolves ldap-server as {ip}")
+
+
 def reconcile_runtime(env_path: Path, config: dict) -> None:
     env = {}
     if env_path.is_file():
@@ -843,6 +954,8 @@ def reconcile_runtime(env_path: Path, config: dict) -> None:
     else:
         print("Starting OpenCloud stack (includes Caddy)…")
     run_compose(COMPOSE_DIR, "up", "-d", "--wait", "--force-recreate", env=env)
+    if str((config.get("auth") or {}).get("mode") or "").lower() == "oidc":
+        pin_ldap_server_after_up(config, env)
 
     weboffice = config.get("weboffice") or {}
     if to_bool(weboffice.get("enabled")) and str(weboffice.get("type") or "") == "euro_office":

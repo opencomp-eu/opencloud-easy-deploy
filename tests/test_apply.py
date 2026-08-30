@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import textwrap
 from pathlib import Path
@@ -10,11 +11,13 @@ import pytest
 import yaml
 
 from scripts.apply import (
+    _network_address,
     apply_engine_oidc_sidecar,
     bootstrap_ldap_tls,
     build_env_vars,
     build_proxy_role_block,
     derive_compose_files,
+    discover_ldap_server_ip,
     ldap_data_dir,
     opencloud_admin_user_id,
     render_caddyfile,
@@ -311,6 +314,7 @@ def test_render_network_overlay_sets_container_names(tmp_path, monkeypatch):
 
     assert data["services"]["opencloud"]["container_name"] == "opencloud"
     assert data["services"]["euro-office"]["container_name"] == "euro-office"
+    assert "ldap-server" not in data["services"]
     assert data["networks"]["opencloud-net"]["external"] is True
     assert "eurooffice.test.example:host-gateway" in data["services"]["opencloud"]["extra_hosts"]
     assert "cloud.test.example:host-gateway" in data["services"]["euro-office"]["extra_hosts"]
@@ -331,6 +335,69 @@ def test_render_network_overlay_adds_idp_host_gateway(tmp_path, monkeypatch):
     )
     data = yaml.safe_load(overlay_path.read_text())
     assert "auth.test.example:host-gateway" in data["services"]["opencloud"]["extra_hosts"]
+
+
+def test_render_network_overlay_dual_homes_ldap_server(tmp_path, monkeypatch):
+    from scripts import apply as apply_module
+
+    overlay_path = tmp_path / "network-fixups.yml"
+    monkeypatch.setattr(apply_module, "NETWORK_OVERLAY_PATH", overlay_path)
+    render_network_overlay(
+        _base_config(
+            proxy={"type": "caddy", "mode": "integrate"},
+            auth={
+                "mode": "oidc",
+                "oidc": {"domain": "auth.test.example"},
+            },
+        )
+    )
+    data = yaml.safe_load(overlay_path.read_text())
+    ldap = data["services"]["ldap-server"]
+    assert ldap["container_name"] == "ldap-server"
+    assert ldap["networks"] == ["opencloud-net", "easydeploy-net"]
+    assert data["services"]["opencloud"]["depends_on"] == ["ldap-server"]
+    assert data["services"]["opencloud"]["links"] == ["ldap-server"]
+    assert data["services"]["opencloud"]["networks"] == ["opencloud-net", "easydeploy-net"]
+
+
+def test_render_network_overlay_pins_ldap_ip(tmp_path, monkeypatch):
+    from scripts import apply as apply_module
+
+    overlay_path = tmp_path / "network-fixups.yml"
+    monkeypatch.setattr(apply_module, "NETWORK_OVERLAY_PATH", overlay_path)
+    render_network_overlay(
+        _base_config(
+            auth={"mode": "oidc", "oidc": {"domain": "auth.test.example"}},
+        ),
+        ldap_ip="172.20.0.7",
+    )
+    data = yaml.safe_load(overlay_path.read_text())
+    assert "ldap-server:172.20.0.7" in data["services"]["opencloud"]["extra_hosts"]
+
+
+def test_network_address_skips_invalid_placeholder():
+    assert _network_address({"IPAddress": "invalid IP"}) == ""
+    assert _network_address({"IPAddress": "172.20.0.7"}) == "172.20.0.7"
+    assert _network_address({"IPAddress": "", "GlobalIPv6Address": "fd00::7"}) == "fd00::7"
+
+
+def test_discover_ldap_server_ip_reads_inspect_json(monkeypatch):
+    inspect = [
+        {
+            "NetworkSettings": {
+                "Networks": {
+                    "opencloud-net": {"IPAddress": "172.20.0.9"},
+                }
+            }
+        }
+    ]
+
+    def fake_run(cmd, **_kwargs):
+        assert cmd[:2] == ["docker", "inspect"]
+        return type("R", (), {"returncode": 0, "stdout": json.dumps(inspect), "stderr": ""})()
+
+    monkeypatch.setattr("scripts.apply.subprocess.run", fake_run)
+    assert discover_ldap_server_ip() == "172.20.0.9"
 
 
 def test_render_caddyfile_allows_opencloud_iframe(tmp_path, monkeypatch):
