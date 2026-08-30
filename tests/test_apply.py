@@ -354,7 +354,7 @@ def test_render_network_overlay_dual_homes_ldap_server(tmp_path, monkeypatch):
     data = yaml.safe_load(overlay_path.read_text())
     ldap = data["services"]["ldap-server"]
     assert ldap["container_name"] == "ldap-server"
-    assert ldap["networks"] == ["opencloud-net", "easydeploy-net"]
+    assert ldap["networks"] == ["opencloud-net"]
     assert data["services"]["opencloud"]["depends_on"] == ["ldap-server"]
     assert data["services"]["opencloud"]["links"] == ["ldap-server"]
     assert data["services"]["opencloud"]["networks"] == ["opencloud-net", "easydeploy-net"]
@@ -398,6 +398,25 @@ def test_discover_ldap_server_ip_reads_inspect_json(monkeypatch):
 
     monkeypatch.setattr("scripts.apply.subprocess.run", fake_run)
     assert discover_ldap_server_ip() == "172.20.0.9"
+
+
+def test_discover_ldap_server_ip_ignores_other_networks(monkeypatch):
+    inspect = [
+        {
+            "NetworkSettings": {
+                "Networks": {
+                    "easydeploy-net": {"IPAddress": "172.21.0.4"},
+                    "opencloud-net": {"IPAddress": "172.18.0.8"},
+                }
+            }
+        }
+    ]
+
+    def fake_run(cmd, **_kwargs):
+        return type("R", (), {"returncode": 0, "stdout": json.dumps(inspect), "stderr": ""})()
+
+    monkeypatch.setattr("scripts.apply.subprocess.run", fake_run)
+    assert discover_ldap_server_ip() == "172.18.0.8"
 
 
 def test_render_caddyfile_allows_opencloud_iframe(tmp_path, monkeypatch):

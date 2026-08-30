@@ -300,17 +300,11 @@ def discover_ldap_server_ip() -> str:
         networks = (payload[0].get("NetworkSettings") or {}).get("Networks") or {}
         if not isinstance(networks, dict):
             continue
-        for net_name in ("opencloud-net", DEFAULT_INTEGRATE_NETWORK):
-            net = networks.get(net_name)
-            if isinstance(net, dict):
-                address = _network_address(net)
-                if address:
-                    return address
-        for net in networks.values():
-            if isinstance(net, dict):
-                address = _network_address(net)
-                if address:
-                    return address
+        net = networks.get("opencloud-net")
+        if isinstance(net, dict):
+            address = _network_address(net)
+            if address:
+                return address
     return ""
 
 
@@ -319,7 +313,7 @@ def pin_ldap_hosts_in_container(ip: str) -> None:
     if not ip:
         return
     script = (
-        f"grep -qE '[[:space:]]ldap-server$' /etc/hosts || "
+        f"sed -i '/[[:space:]]ldap-server$/d' /etc/hosts; "
         f"echo '{ip} ldap-server' >> /etc/hosts"
     )
     subprocess.run(
@@ -355,12 +349,9 @@ def render_network_overlay(config: dict, ldap_ip: str = "") -> None:
     # embedded DNS SERVFAIL lookups for names that only exist on one network.
     # Pin ldap-server via extra_hosts/links so the name never hits 127.0.0.11.
     if str((config.get("auth") or {}).get("mode") or "").lower() == "oidc":
-        ldap_networks: list[str] = ["opencloud-net"]
-        if proxy_mode(config) == "integrate":
-            ldap_networks.append(DEFAULT_INTEGRATE_NETWORK)
         services["ldap-server"] = {
             "container_name": "ldap-server",
-            "networks": ldap_networks,
+            "networks": ["opencloud-net"],
         }
         opencloud_service["depends_on"] = ["ldap-server"]
         opencloud_service["links"] = ["ldap-server"]
@@ -834,6 +825,32 @@ def ensure_docker_network(name: str) -> None:
         subprocess.run(["docker", "network", "create", name], check=True)
 
 
+def ensure_container_on_network(container: str, network: str) -> None:
+    inspect = subprocess.run(
+        ["docker", "inspect", container],
+        capture_output=True,
+        text=True,
+    )
+    if inspect.returncode != 0:
+        return
+    try:
+        payload = json.loads(inspect.stdout)
+    except json.JSONDecodeError:
+        return
+    if not isinstance(payload, list) or not payload:
+        return
+    networks = (payload[0].get("NetworkSettings") or {}).get("Networks") or {}
+    if network in networks:
+        return
+    connected = subprocess.run(
+        ["docker", "network", "connect", network, container],
+        capture_output=True,
+        text=True,
+    )
+    if connected.returncode == 0:
+        print(f"  Attached {container} to {network}")
+
+
 def run_compose(directory: Path, *args: str, env: dict[str, str] | None = None) -> None:
     cmd = docker_compose_cmd() + list(args)
     merged_env = os.environ.copy()
@@ -898,14 +915,24 @@ def stop_opencloud_caddy() -> None:
         subprocess.run(["docker", "rm", "opencloud_caddy"], check=False)
 
 
+def destroy_ldap_containers() -> None:
+    """A dead Docker network sandbox cannot be repaired — only replaced."""
+    for name in LDAP_CONTAINER_CANDIDATES:
+        subprocess.run(["docker", "rm", "-f", name], capture_output=True)
+
+
 def pin_ldap_server_after_up(config: dict, env: dict[str, str]) -> None:
     """After LDAP has an IP, bake ldap-server into OpenCloud extra_hosts and /etc/hosts."""
     ip = discover_ldap_server_ip()
     if not ip:
-        print("Recreating ldap-server — it has no usable address on opencloud-net…")
-        run_compose(COMPOSE_DIR, "up", "-d", "--force-recreate", "ldap-server", env=env)
-        time.sleep(2)
-        ip = discover_ldap_server_ip()
+        print("ldap-server has no usable address; replacing the container…")
+        destroy_ldap_containers()
+        run_compose(COMPOSE_DIR, "up", "-d", "--force-recreate", "--no-deps", "ldap-server", env=env)
+        for _ in range(10):
+            time.sleep(1)
+            ip = discover_ldap_server_ip()
+            if ip:
+                break
     if not ip:
         print(
             "Warning: bundled ldap-server has no address yet; "
@@ -917,7 +944,7 @@ def pin_ldap_server_after_up(config: dict, env: dict[str, str]) -> None:
     render_network_overlay(config, ldap_ip=ip)
     after = NETWORK_OVERLAY_PATH.read_text()
     if before != after:
-        print(f"Pinning ldap-server → {ip} (Docker DNS is unusable from a dual-homed container)…")
+        print(f"Pinning ldap-server → {ip} on opencloud-net (bypass Docker DNS)…")
         run_compose(
             COMPOSE_DIR,
             "up",
@@ -927,6 +954,7 @@ def pin_ldap_server_after_up(config: dict, env: dict[str, str]) -> None:
             "opencloud",
             env=env,
         )
+    ensure_container_on_network("opencloud", "opencloud-net")
     pin_ldap_hosts_in_container(ip)
     print(f"  OpenCloud resolves ldap-server as {ip}")
 
