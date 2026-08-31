@@ -4,7 +4,7 @@
 opencloud:
   domain: cloud.example.com
   image: opencloudeu/opencloud-rolling
-  tag: "7.2.0"
+  tag: "7.5.0"
   admin_username: admin
   data_dir: /var/lib/opencloud/data
   config_dir: /var/lib/opencloud/config

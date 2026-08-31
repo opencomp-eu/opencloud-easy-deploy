@@ -106,7 +106,7 @@ def update_from_wizard(
     opencloud = config.setdefault("opencloud", {})
     opencloud["domain"] = domain
     opencloud.setdefault("image", "opencloudeu/opencloud-rolling")
-    opencloud.setdefault("tag", "7.2.0")
+    opencloud.setdefault("tag", "7.5.0")
     opencloud.setdefault("admin_username", "admin")
     opencloud.setdefault("language", "en")
     opencloud["data_dir"] = f"{data_root.rstrip('/')}/data"

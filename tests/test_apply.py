@@ -32,7 +32,7 @@ def _base_config(**overrides) -> dict:
         "opencloud": {
             "domain": "cloud.test.example",
             "image": "opencloudeu/opencloud-rolling",
-            "tag": "7.2.0",
+            "tag": "7.5.0",
             "data_dir": "/var/lib/opencloud/data",
             "config_dir": "/var/lib/opencloud/config",
             "apps_dir": "/var/lib/opencloud/apps",
