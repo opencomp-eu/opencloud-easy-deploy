@@ -6,7 +6,9 @@ services:
       PROXY_OIDC_ACCESS_TOKEN_VERIFY_METHOD: "none"
     volumes:
       - ${OC_CONFIG_DIR}/proxy.yaml:/etc/opencloud/proxy.yaml
+      - ${OC_CONFIG_DIR}/csp.yaml:/etc/opencloud/csp.yaml
 
 networks:
   opencloud-net:
+    external: true
     name: opencloud-net

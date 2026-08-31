@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import secrets
 import shutil
@@ -23,17 +24,36 @@ from scripts.backup import (
 )
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(PROJECT_ROOT / "easydeploy-lib" / "python"))
+import hostfs  # noqa: E402
+
 COMPOSE_DIR = PROJECT_ROOT / "opencloud-compose"
 STATE_DIR = PROJECT_ROOT / ".opencloud-easy-deploy"
 SECRETS_PATH = STATE_DIR / "secrets.yaml"
 DEPLOY_PATH = PROJECT_ROOT / "deploy.yaml"
 NETWORK_OVERLAY_PATH = STATE_DIR / "compose" / "network-fixups.yml"
+INTEGRATION_DIR = STATE_DIR / "integration"
+INTEGRATION_CADDY_FRAGMENT = INTEGRATION_DIR / "caddy.caddy"
+EMBED_SIDECAR = INTEGRATION_DIR / "embed.yaml"
+DEFAULT_INTEGRATE_NETWORK = "easydeploy-net"
+PLACEHOLDER_EMBED_HOSTS = frozenset(
+    {
+        "webmail.example.com",
+        "example.com",
+        "mail.example.com",
+    }
+)
+BITNAMI_OPENLDAP_UID = 1001
+# Bitnami OpenLDAP runs as uid 1001 and needs gid 0 to write slapd.ldif
+# into the bind-mounted /opt/bitnami/openldap/share (our ldap_certs dir).
+BITNAMI_OPENLDAP_GID = 0
 CADDY_DIR = PROJECT_ROOT / "caddy"
 CADDY_TEMPLATE = CADDY_DIR / "Caddyfile.template"
 CADDYFILE = CADDY_DIR / "Caddyfile"
 PROXY_ROLE_TEMPLATE = (
     PROJECT_ROOT / "config-templates" / "opencloud" / "proxy.yaml.template"
 )
+CSP_TEMPLATE = PROJECT_ROOT / "config-templates" / "opencloud" / "csp.yaml.template"
 
 SECRET_KEYS = (
     "INITIAL_ADMIN_PASSWORD",
@@ -50,6 +70,13 @@ def to_bool(value: Any) -> bool:
     if value is None:
         return False
     return str(value).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def proxy_mode(config: dict) -> str:
+    mode = str((config.get("proxy") or {}).get("mode") or "standalone").strip().lower()
+    if mode not in {"standalone", "integrate"}:
+        raise ValueError("proxy.mode must be 'standalone' or 'integrate'")
+    return mode
 
 
 def load_yaml(path: Path) -> dict:
@@ -76,12 +103,168 @@ def render_template(template: str, values: dict[str, str]) -> str:
     return rendered
 
 
+def _blank(value: Any) -> bool:
+    if value is None:
+        return True
+    if isinstance(value, str):
+        return not value.strip()
+    if isinstance(value, dict):
+        return not value
+    return False
+
+
+def managed_is_false(section: dict | None) -> bool:
+    value = (section or {}).get("managed")
+    if value is False:
+        return True
+    return str(value or "").strip().lower() in {"false", "no", "0"}
+
+
+def oidc_provider(config: dict) -> str:
+    oidc = (config.get("auth") or {}).get("oidc") or {}
+    return str(oidc.get("provider") or "").strip().lower()
+
+
+def ldap_data_dir(config: dict) -> Path:
+    return Path(str(config["opencloud"]["config_dir"])).parent / "ldap_data"
+
+
+def opencloud_admin_user_id(config: dict) -> str:
+    """Kanidm prefer-short-username → OpenCloud username is the person name (thomas)."""
+    oidc = (config.get("auth") or {}).get("oidc") or {}
+    explicit = str(oidc.get("admin_user") or "").strip()
+    if explicit:
+        return explicit
+    sibling = PROJECT_ROOT.parent / "kanidm-easy-deploy" / "deploy.yaml"
+    if not sibling.is_file():
+        return ""
+    try:
+        kanidm_cfg = load_yaml(sibling)
+    except (OSError, ValueError):
+        return ""
+    for user in kanidm_cfg.get("users") or []:
+        if not isinstance(user, dict):
+            continue
+        username = str(user.get("username") or "").strip()
+        groups = [str(item).strip() for item in (user.get("groups") or [])]
+        if username and "opencloud-admin" in groups:
+            return username
+    return ""
+
+
+def apply_engine_oidc_sidecar(config: dict, sidecar_path: Path | None = None) -> None:
+    """Apply engine-managed Kanidm OIDC settings.
+
+    When management is enabled, the engine sidecar is authoritative. This
+    prevents example or stale issuer values in deploy.yaml from overriding the
+    currently wired Kanidm instance. Set auth.oidc.managed: false to opt out.
+    """
+    path = sidecar_path or (INTEGRATION_DIR / "oidc-provider.yaml")
+    if not path.is_file():
+        return
+    sidecar = load_yaml(path)
+    if not isinstance(sidecar, dict):
+        return
+    auth = config.setdefault("auth", {})
+    oidc = auth.setdefault("oidc", {})
+    if not isinstance(oidc, dict):
+        return
+    if managed_is_false(oidc):
+        return
+    existing_provider = str(oidc.get("provider") or "").strip().lower()
+    if existing_provider and existing_provider != "kanidm":
+        return
+    auth["mode"] = "oidc"
+    for key, value in sidecar.items():
+        if key == "managed":
+            continue
+        oidc[key] = value
+    oidc["provider"] = "kanidm"
+
+
+def https_origin(value: Any) -> str:
+    """Normalize a hostname or URL to `https://host` with no trailing slash."""
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if "://" in text:
+        scheme, rest = text.split("://", 1)
+        if scheme.lower() not in {"http", "https"}:
+            return ""
+        host = rest.split("/")[0].split("?")[0].split("#")[0].strip().lower()
+    else:
+        host = text.split("/")[0].split("?")[0].split("#")[0].strip().lower()
+    if not host or host in PLACEHOLDER_EMBED_HOSTS:
+        return ""
+    return f"https://{host}"
+
+
+def unique_https_origins(values: Any) -> list[str]:
+    origins: list[str] = []
+    seen: set[str] = set()
+    if isinstance(values, str):
+        values = [values]
+    if not isinstance(values, list):
+        return origins
+    for item in values:
+        origin = https_origin(item)
+        if origin and origin not in seen:
+            seen.add(origin)
+            origins.append(origin)
+    return origins
+
+
+def apply_engine_embed_sidecar(config: dict, sidecar_path: Path | None = None) -> None:
+    """Merge extra frame-ancestors from the engine sidecar (Bulwark webmail)."""
+    path = sidecar_path or EMBED_SIDECAR
+    embed = config.get("embed")
+    if embed is None:
+        embed = {}
+    elif not isinstance(embed, dict):
+        return
+    if managed_is_false(embed):
+        return
+    extra: list[Any] = []
+    if path.is_file():
+        sidecar = load_yaml(path)
+        if isinstance(sidecar, dict):
+            extra = sidecar.get("frame_ancestors") or []
+    current = embed.get("frame_ancestors") or []
+    merged = unique_https_origins(list(current) + list(extra))
+    if merged:
+        target = config.setdefault("embed", {})
+        if isinstance(target, dict):
+            target["frame_ancestors"] = merged
+
+
+def extra_frame_ancestors(config: dict) -> list[str]:
+    embed = config.get("embed") or {}
+    if not isinstance(embed, dict):
+        return []
+    self_origin = https_origin(config.get("opencloud", {}).get("domain"))
+    return [origin for origin in unique_https_origins(embed.get("frame_ancestors")) if origin != self_origin]
+
+
+def office_frame_ancestors_csp(config: dict) -> str:
+    """CSP frame-ancestors for the document editor (nested iframes check every ancestor)."""
+    parts = ["'self'", f"https://{config['opencloud']['domain']}"]
+    seen = set(parts)
+    for origin in extra_frame_ancestors(config):
+        if origin not in seen:
+            seen.add(origin)
+            parts.append(origin)
+    return " ".join(parts)
+
+
 def load_config(path: Path = DEPLOY_PATH) -> dict:
     if not path.exists():
         raise FileNotFoundError(
             f"Missing {path.name}. Copy deploy.yaml.example to deploy.yaml or run wizard.sh."
         )
-    return load_yaml(path)
+    config = load_yaml(path)
+    apply_engine_oidc_sidecar(config)
+    apply_engine_embed_sidecar(config)
+    return config
 
 
 def validate_config(config: dict) -> None:
@@ -121,11 +304,25 @@ def validate_config(config: dict) -> None:
         if not str(weboffice.get("domain") or "").strip():
             raise ValueError("weboffice.domain is required when weboffice is enabled")
 
+    embed = config.get("embed")
+    if embed is not None:
+        if not isinstance(embed, dict):
+            raise ValueError("embed must be a mapping")
+        ancestors = embed.get("frame_ancestors")
+        if ancestors is not None:
+            if isinstance(ancestors, str):
+                ancestors = [ancestors]
+            if not isinstance(ancestors, list) or any(not str(item or "").strip() for item in ancestors):
+                raise ValueError("embed.frame_ancestors must be a list of hostnames or https origins")
+
     validate_backup_config(config)
+    proxy_mode(config)
 
 
 def derive_compose_files(config: dict) -> list[str]:
-    files = ["docker-compose.yml", "external-proxy/opencloud.yml", "../overlays/proxy/caddy.yml"]
+    files = ["docker-compose.yml", "external-proxy/opencloud.yml"]
+    if proxy_mode(config) == "standalone":
+        files.append("../overlays/proxy/caddy.yml")
 
     weboffice = config.get("weboffice") or {}
     if to_bool(weboffice.get("enabled")):
@@ -146,6 +343,9 @@ def derive_compose_files(config: dict) -> list[str]:
     auth_mode = str((config.get("auth") or {}).get("mode") or "builtin").lower()
     if auth_mode == "oidc":
         files.extend(["idm/external-idp.yml", "../overlays/idm/oidc-external.yml"])
+        provider = str((config.get("auth") or {}).get("oidc", {}).get("provider") or "").lower()
+        if provider == "kanidm":
+            files.append("../overlays/idm/kanidm-provider.yml")
 
     modules = config.get("modules") or {}
     if to_bool(modules.get("search")):
@@ -162,17 +362,111 @@ def derive_compose_files(config: dict) -> list[str]:
     return files
 
 
-def render_network_overlay(config: dict) -> None:
+LDAP_CONTAINER_CANDIDATES = ("ldap-server", "opencloud-compose-ldap-server-1")
+
+
+def _network_address(net: dict) -> str:
+    ip = str(net.get("IPAddress") or "").strip()
+    if ip and ip.lower() not in {"invalid ip", "<nil>", "0.0.0.0"}:
+        return ip
+    ip6 = str(net.get("GlobalIPv6Address") or "").strip()
+    if ip6:
+        return ip6
+    return ""
+
+
+def _ldap_ip_from_network(network: str = "opencloud-net") -> str:
+    """Address Docker actually assigned on the bridge — not a stale inspect cache."""
+    result = subprocess.run(
+        ["docker", "network", "inspect", network],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0 or not (result.stdout or "").strip():
+        return ""
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return ""
+    if not isinstance(payload, list) or not payload:
+        return ""
+    containers = payload[0].get("Containers") or {}
+    if not isinstance(containers, dict):
+        return ""
+    for info in containers.values():
+        if not isinstance(info, dict):
+            continue
+        name = str(info.get("Name") or "")
+        if name not in LDAP_CONTAINER_CANDIDATES and not name.endswith("ldap-server"):
+            continue
+        raw = str(info.get("IPv4Address") or "").split("/", 1)[0].strip()
+        if raw and raw.lower() not in {"invalid ip", "<nil>", "0.0.0.0"}:
+            return raw
+    return ""
+
+
+def discover_ldap_server_ip() -> str:
+    """Return the bundled LDAP IPv4 on opencloud-net, or empty if it is not attached."""
+    from_bridge = _ldap_ip_from_network("opencloud-net")
+    if from_bridge:
+        return from_bridge
+    for name in LDAP_CONTAINER_CANDIDATES:
+        result = subprocess.run(
+            ["docker", "inspect", name],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0 or not (result.stdout or "").strip():
+            continue
+        try:
+            payload = json.loads(result.stdout)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(payload, list) or not payload:
+            continue
+        networks = (payload[0].get("NetworkSettings") or {}).get("Networks") or {}
+        if not isinstance(networks, dict):
+            continue
+        net = networks.get("opencloud-net")
+        if isinstance(net, dict):
+            address = _network_address(net)
+            if address:
+                return address
+    return ""
+
+
+def render_network_overlay(config: dict, ldap_ip: str = "") -> None:
     """Stable Docker DNS names and host-gateway routes for cross-stack proxy/WOPI."""
     opencloud_domain = str(config["opencloud"]["domain"])
     weboffice = config.get("weboffice") or {}
 
+    extra_hosts = [f"{opencloud_domain}:host-gateway"]
+    oidc = (config.get("auth") or {}).get("oidc") or {}
+    idp_domain = str(oidc.get("domain") or "").strip()
+    if idp_domain and idp_domain != opencloud_domain:
+        extra_hosts.append(f"{idp_domain}:host-gateway")
+    if ldap_ip:
+        extra_hosts.append(f"ldap-server:{ldap_ip}")
+
     opencloud_service: dict[str, Any] = {
         "container_name": "opencloud",
-        "extra_hosts": [f"{opencloud_domain}:host-gateway"],
+        "extra_hosts": extra_hosts,
     }
+    if proxy_mode(config) == "integrate":
+        opencloud_service["networks"] = ["opencloud-net", DEFAULT_INTEGRATE_NETWORK]
 
     services: dict[str, Any] = {"opencloud": opencloud_service}
+
+    # Dual-homed OpenCloud (opencloud-net + easydeploy-net) makes Docker's
+    # embedded DNS SERVFAIL lookups for names that only exist on one network.
+    # Pin ldap-server via extra_hosts/links so the name never hits 127.0.0.11.
+    if str((config.get("auth") or {}).get("mode") or "").lower() == "oidc":
+        services["ldap-server"] = {
+            "container_name": "ldap-server",
+            "networks": ["opencloud-net"],
+        }
+        opencloud_service["depends_on"] = ["ldap-server"]
+        opencloud_service["links"] = ["ldap-server"]
 
     if to_bool(weboffice.get("enabled")):
         office_domain = str(weboffice.get("domain") or "")
@@ -182,19 +476,35 @@ def render_network_overlay(config: dict) -> None:
             opencloud_service["extra_hosts"].append(f"{office_domain}:host-gateway")
 
         if office_type == "euro_office":
-            services["euro-office"] = {
+            euro_svc: dict[str, Any] = {
                 "container_name": "euro-office",
                 "extra_hosts": [f"{opencloud_domain}:host-gateway"],
             }
+            if proxy_mode(config) == "integrate":
+                euro_svc["networks"] = ["opencloud-net", DEFAULT_INTEGRATE_NETWORK]
+            services["euro-office"] = euro_svc
         elif office_type == "collabora":
-            services["collabora"] = {
+            collab_svc: dict[str, Any] = {
                 "container_name": "collabora",
                 "extra_hosts": [f"{opencloud_domain}:host-gateway"],
             }
+            if proxy_mode(config) == "integrate":
+                collab_svc["networks"] = ["opencloud-net", DEFAULT_INTEGRATE_NETWORK]
+            services["collabora"] = collab_svc
+
+    overlay: dict[str, Any] = {"services": services}
+    overlay["networks"] = {
+        "opencloud-net": {"external": True, "name": "opencloud-net"},
+    }
+    if proxy_mode(config) == "integrate":
+        overlay["networks"][DEFAULT_INTEGRATE_NETWORK] = {
+            "external": True,
+            "name": DEFAULT_INTEGRATE_NETWORK,
+        }
 
     NETWORK_OVERLAY_PATH.parent.mkdir(parents=True, exist_ok=True)
     with NETWORK_OVERLAY_PATH.open("w") as handle:
-        yaml.safe_dump({"services": services}, handle, default_flow_style=False)
+        yaml.safe_dump(overlay, handle, default_flow_style=False)
 
 
 def generate_secret(length: int = 32) -> str:
@@ -254,10 +564,12 @@ def build_env_vars(config: dict, secrets: dict[str, str]) -> dict[str, str]:
         "OC_CONFIG_DIR": str(opencloud["config_dir"]),
         "OC_DATA_DIR": str(opencloud["data_dir"]),
         "OC_APPS_DIR": str(opencloud["apps_dir"]),
+        "OC_CONTAINER_UID_GID": "{0}:{1}".format(*hostfs.service_uid_gid(root_default=(1000, 1000))),
         "DEFAULT_LANGUAGE": str(opencloud.get("language") or "en"),
         "START_ADDITIONAL_SERVICES": build_additional_services(config),
-        "OCD_CADDYFILE": str(CADDYFILE.resolve()),
     }
+    if proxy_mode(config) == "standalone":
+        env["OCD_CADDYFILE"] = str(CADDYFILE.resolve())
 
     ldap_base = Path(str(opencloud["config_dir"])).parent
     env["LDAP_CERTS_DIR"] = str(ldap_base / "ldap_certs")
@@ -279,27 +591,37 @@ def build_env_vars(config: dict, secrets: dict[str, str]) -> dict[str, str]:
             env["COLLABORA_SSL_VERIFICATION"] = "true"
 
     if auth_mode == "oidc":
-        role_mapping = oidc.get("role_mapping") or {}
+        provider = oidc_provider(config)
+        default_scopes = (
+            "openid profile email groups groups_name"
+            if provider == "kanidm"
+            else "openid profile email offline_access"
+        )
+        kanidm = provider == "kanidm"
         env.update(
             {
                 "LDAP_BIND_PASSWORD": secrets["LDAP_BIND_PASSWORD"],
-                "PROXY_ROLE_ASSIGNMENT_DRIVER": "oidc",
-                "GRAPH_ASSIGN_DEFAULT_USER_ROLE": "false",
+                "PROXY_ROLE_ASSIGNMENT_DRIVER": "default" if kanidm else "oidc",
+                "GRAPH_ASSIGN_DEFAULT_USER_ROLE": "true" if kanidm else "false",
                 "IDP_DOMAIN": str(oidc["domain"]),
                 "IDP_ISSUER_URL": str(oidc["issuer_url"]),
                 "IDP_ACCOUNT_URL": str(oidc["account_url"]),
-                "PROXY_ROLE_ASSIGNMENT_OIDC_CLAIM": str(
-                    oidc.get("role_claim") or "groups"
-                ),
                 "OC_OIDC_CLIENT_ID": str(oidc["client_id"]),
                 "OC_OIDC_CLIENT_SCOPES": str(
-                    oidc.get("client_scopes") or "openid profile email offline_access"
+                    oidc.get("client_scopes") or default_scopes
                 ),
                 "OC_SHARING_PUBLIC_SHARE_MUST_HAVE_PASSWORD": "false",
                 "OC_SHARING_PUBLIC_WRITEABLE_SHARE_MUST_HAVE_PASSWORD": "false",
             }
         )
-        env["_ROLE_MAPPING"] = yaml.safe_dump(role_mapping, default_flow_style=True)
+        if kanidm:
+            env["OC_ADMIN_USER_ID"] = opencloud_admin_user_id(config)
+            env["SETTINGS_SETUP_DEFAULT_ASSIGNMENTS"] = "true"
+            env["OC_LDAP_DISABLE_USER_MECHANISM"] = "none"
+        else:
+            env["PROXY_ROLE_ASSIGNMENT_OIDC_CLAIM"] = str(
+                oidc.get("role_claim") or "groups"
+            )
 
     return env
 
@@ -335,6 +657,46 @@ def ensure_compose_submodule() -> None:
         raise FileNotFoundError("Failed to initialize opencloud-compose submodule")
 
 
+def bootstrap_ldap_tls(ldap_certs_dir: Path) -> None:
+    """Pre-create LDAP TLS material on the host (Bitnami entrypoint cannot write bind mounts)."""
+    key_path = ldap_certs_dir / "openldap.key"
+    cert_path = ldap_certs_dir / "openldap.crt"
+    if key_path.is_file() and cert_path.is_file():
+        return
+
+    ldap_certs_dir = hostfs.ensure_writable_directory(ldap_certs_dir)
+    subprocess.run(
+        [
+            "openssl",
+            "req",
+            "-x509",
+            "-newkey",
+            "rsa:4096",
+            "-keyout",
+            str(key_path),
+            "-out",
+            str(cert_path),
+            "-sha256",
+            "-days",
+            "365",
+            "-batch",
+            "-nodes",
+            "-subj",
+            "/CN=opencloud-ldap",
+        ],
+        check=True,
+        capture_output=True,
+    )
+    key_path.chmod(0o640)
+    cert_path.chmod(0o644)
+    try:
+        hostfs.chown_path(key_path, BITNAMI_OPENLDAP_UID, BITNAMI_OPENLDAP_GID)
+        hostfs.chown_path(cert_path, BITNAMI_OPENLDAP_UID, BITNAMI_OPENLDAP_GID)
+        hostfs.chown_path(ldap_certs_dir, BITNAMI_OPENLDAP_UID, BITNAMI_OPENLDAP_GID)
+    except PermissionError:
+        key_path.chmod(0o644)
+
+
 def bootstrap_config(config: dict) -> None:
     opencloud = config["opencloud"]
     config_dir = Path(str(opencloud["config_dir"]))
@@ -350,7 +712,11 @@ def bootstrap_config(config: dict) -> None:
         ldap_base / "ldap_certs",
         ldap_base / "ldap_data",
     ):
-        directory.mkdir(parents=True, exist_ok=True)
+        hostfs.ensure_writable_directory(directory)
+
+    auth_mode = str((config.get("auth") or {}).get("mode") or "builtin").lower()
+    if auth_mode == "oidc":
+        bootstrap_ldap_tls(ldap_base / "ldap_certs")
 
     upstream_config = COMPOSE_DIR / "config" / "opencloud"
     if not upstream_config.is_dir():
@@ -372,6 +738,50 @@ def bootstrap_config(config: dict) -> None:
             shutil.copy2(euro_registry, euro_target)
 
 
+def build_proxy_role_block(config: dict) -> str:
+    oidc = (config.get("auth") or {}).get("oidc") or {}
+    if oidc_provider(config) == "kanidm":
+        return "role_assignment:\n  driver: default\n"
+    role_mapping = oidc.get("role_mapping") or {}
+    return render_template(
+        PROXY_ROLE_TEMPLATE.read_text(),
+        {
+            "ROLE_CLAIM": str(oidc.get("role_claim") or "groups"),
+            "ROLE_ADMIN": str(role_mapping.get("admin") or "opencloud-admin"),
+            "ROLE_USER": str(role_mapping.get("user") or "opencloud-user"),
+            "ROLE_GUEST": str(role_mapping.get("guest") or "opencloud-guest"),
+        },
+    )
+
+
+def wipe_local_oidc_accounts(config: dict) -> None:
+    """Drop OpenCloud's bundled OpenLDAP DB (autoprovisioned users). Does not touch Kanidm."""
+    data = ldap_data_dir(config)
+    env_path = COMPOSE_DIR / ".env"
+    env: dict[str, str] = {}
+    if env_path.is_file():
+        for line in env_path.read_text().splitlines():
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            env[key.strip()] = value.strip()
+    print("Stopping OpenCloud + bundled LDAP to wipe local accounts…")
+    try:
+        run_compose(COMPOSE_DIR, "stop", "opencloud", "ldap-server", env=env)
+    except subprocess.CalledProcessError:
+        for name in ("opencloud", "opencloud-ldap-server-1", "ldap-server"):
+            subprocess.run(["docker", "stop", name], check=False, capture_output=True)
+    if data.is_dir():
+        for child in data.iterdir():
+            if child.is_dir():
+                shutil.rmtree(child)
+            else:
+                child.unlink()
+        print(f"  Wiped bundled LDAP data at {data}")
+    else:
+        print(f"  No bundled LDAP data at {data}")
+
+
 def render_proxy_yaml(config: dict) -> None:
     config_dir = Path(str(config["opencloud"]["config_dir"]))
     proxy_path = config_dir / "proxy.yaml"
@@ -381,38 +791,72 @@ def render_proxy_yaml(config: dict) -> None:
     upstream_body = upstream_proxy.read_text() if upstream_proxy.is_file() else ""
 
     if auth_mode == "oidc":
-        oidc = config["auth"]["oidc"]
-        role_mapping = oidc.get("role_mapping") or {}
-        role_block = render_template(
-            PROXY_ROLE_TEMPLATE.read_text(),
-            {
-                "ROLE_CLAIM": str(oidc.get("role_claim") or "groups"),
-                "ROLE_ADMIN": str(role_mapping.get("admin") or "opencloud-admin"),
-                "ROLE_USER": str(role_mapping.get("user") or "opencloud-user"),
-                "ROLE_GUEST": str(role_mapping.get("guest") or "opencloud-guest"),
-            },
-        )
+        role_block = build_proxy_role_block(config)
         proxy_path.write_text(f"{role_block.rstrip()}\n{upstream_body.lstrip()}")
     elif not proxy_path.exists():
         proxy_path.write_text(upstream_body)
+    render_csp_yaml(config)
 
 
-def render_caddyfile(config: dict) -> None:
+def web_office_csp_domain(config: dict) -> str:
+    """Origin allowed in OpenCloud CSP for the document-editor iframe."""
+    weboffice = config.get("weboffice") or {}
+    domain = str(weboffice.get("domain") or "").strip()
+    if to_bool(weboffice.get("enabled")) and domain:
+        return domain
+    return str(config["opencloud"]["domain"])
+
+
+def frame_ancestors_extra_yaml(origins: list[str]) -> str:
+    if not origins:
+        return ""
+    return "\n" + "\n".join(f"    - '{origin}'" for origin in origins)
+
+
+def render_csp_yaml(config: dict) -> None:
+    config_dir = Path(str(config["opencloud"]["config_dir"]))
+    config_dir.mkdir(parents=True, exist_ok=True)
+    csp_path = config_dir / "csp.yaml"
+    oidc = ((config.get("auth") or {}).get("oidc") or {})
+    idp_domain = str(oidc.get("domain") or config["opencloud"]["domain"]).strip()
+    rendered = render_template(
+        CSP_TEMPLATE.read_text(),
+        {
+            "IDP_DOMAIN": idp_domain,
+            "WEB_OFFICE_DOMAIN": web_office_csp_domain(config),
+            "FRAME_ANCESTORS_EXTRA": frame_ancestors_extra_yaml(extra_frame_ancestors(config)),
+        },
+    )
+    csp_path.write_text(rendered)
+
+
+def build_caddy_site_blocks(config: dict) -> tuple[str, str]:
     opencloud_domain = str(config["opencloud"]["domain"])
     weboffice = config.get("weboffice") or {}
 
-    oc_security_headers = """
-    header {
+    extra_ancestors = extra_frame_ancestors(config)
+    if extra_ancestors:
+        frame_header = "        -X-Frame-Options"
+        proxy_down = "        header_down -X-Frame-Options\n"
+    else:
+        frame_header = "        X-Frame-Options SAMEORIGIN"
+        proxy_down = ""
+
+    oc_security_headers = f"""
+    header {{
         X-Content-Type-Options nosniff
-        X-Frame-Options SAMEORIGIN
+{frame_header}
         Referrer-Policy strict-origin-when-cross-origin
         -Server
-    }
+    }}
     encode gzip
     log"""
 
     oc_block = f"""{opencloud_domain} {{
-    reverse_proxy opencloud:9200{oc_security_headers}
+    reverse_proxy opencloud:9200 {{
+        header_up X-Forwarded-Proto {{scheme}}
+        header_up X-Forwarded-Host {{host}}
+{proxy_down}    }}{oc_security_headers}
 }}"""
 
     euro_block = ""
@@ -424,47 +868,89 @@ def render_caddyfile(config: dict) -> None:
             else "collabora:9980"
         )
         if office_domain:
-            # Euro Office/Collabora must be embeddable in OpenCloud iframes (cross-origin).
+            ancestors = office_frame_ancestors_csp(config)
             euro_block = f"""
 {office_domain} {{
     reverse_proxy {upstream} {{
         header_down -X-Frame-Options
+        header_down -Content-Security-Policy
     }}
     header {{
         X-Content-Type-Options nosniff
         Referrer-Policy strict-origin-when-cross-origin
         -Server
         -X-Frame-Options
-        Content-Security-Policy "frame-ancestors 'self' https://{opencloud_domain}"
+        Content-Security-Policy "frame-ancestors {ancestors}"
     }}
     encode gzip
     log
-}}"""
+}}""".strip()
 
+    return oc_block.strip(), euro_block
+
+
+def build_caddy_fragment(config: dict) -> str:
+    oc_block, euro_block = build_caddy_site_blocks(config)
+    parts = ["# opencloud-easy-deploy", oc_block]
+    if euro_block:
+        parts.extend(["", "# opencloud-easy-deploy — web office", euro_block])
+    return "\n".join(parts) + "\n"
+
+
+def render_caddyfile(config: dict) -> None:
+    oc_block, euro_block = build_caddy_site_blocks(config)
     rendered = render_template(
         CADDY_TEMPLATE.read_text(),
         {
-            "OC_DOMAIN_BLOCK": oc_block.strip(),
-            "EURO_OFFICE_DOMAIN_BLOCK": euro_block.strip(),
+            "OC_DOMAIN_BLOCK": oc_block,
+            "EURO_OFFICE_DOMAIN_BLOCK": euro_block,
         },
     )
     CADDYFILE.write_text(rendered + "\n")
 
 
+def render_integration_fragment(config: dict) -> None:
+    INTEGRATION_DIR.mkdir(parents=True, exist_ok=True)
+    INTEGRATION_CADDY_FRAGMENT.write_text(build_caddy_fragment(config))
+
+
 def fix_data_permissions(config: dict) -> None:
     opencloud = config["opencloud"]
+    config_dir = Path(str(opencloud["config_dir"]))
+    ldap_base = config_dir.parent
+    auth_mode = str((config.get("auth") or {}).get("mode") or "builtin").lower()
+    uid, gid = hostfs.service_uid_gid(root_default=(1000, 1000))
     paths = [
-        Path(str(opencloud["config_dir"])),
+        config_dir,
         Path(str(opencloud["data_dir"])),
         Path(str(opencloud["apps_dir"])),
-        Path(str(opencloud["config_dir"])).parent / "ldap_certs",
-        Path(str(opencloud["config_dir"])).parent / "ldap_data",
     ]
-    if os.geteuid() != 0:
-        return
     for path in paths:
         if path.exists():
-            shutil.chown(path, user=1000, group=1000)
+            try:
+                hostfs.chown_path(path, uid, gid)
+            except PermissionError:
+                pass
+    if auth_mode == "oidc":
+        ensure_bitnami_ldap_permissions(ldap_base)
+
+
+def ensure_bitnami_ldap_permissions(ldap_base: Path) -> None:
+    """Bitnami must create slapd.ldif in ldap_certs (mounted as .../share)."""
+    owner = f"{BITNAMI_OPENLDAP_UID}:{BITNAMI_OPENLDAP_GID}"
+    for name in ("ldap_certs", "ldap_data"):
+        path = ldap_base / name
+        path.mkdir(parents=True, exist_ok=True)
+        try:
+            os.chmod(path, 0o775)
+        except OSError:
+            pass
+        try:
+            hostfs.chown_path(path, BITNAMI_OPENLDAP_UID, BITNAMI_OPENLDAP_GID)
+        except PermissionError:
+            pass
+        subprocess.run(["sudo", "-n", "chown", "-R", owner, str(path)], check=False, capture_output=True)
+        subprocess.run(["sudo", "-n", "chmod", "0775", str(path)], check=False, capture_output=True)
 
 
 def docker_compose_cmd() -> list[str]:
@@ -489,6 +975,32 @@ def ensure_docker_network(name: str) -> None:
     )
     if result.returncode != 0:
         subprocess.run(["docker", "network", "create", name], check=True)
+
+
+def ensure_container_on_network(container: str, network: str) -> None:
+    inspect = subprocess.run(
+        ["docker", "inspect", container],
+        capture_output=True,
+        text=True,
+    )
+    if inspect.returncode != 0:
+        return
+    try:
+        payload = json.loads(inspect.stdout)
+    except json.JSONDecodeError:
+        return
+    if not isinstance(payload, list) or not payload:
+        return
+    networks = (payload[0].get("NetworkSettings") or {}).get("Networks") or {}
+    if network in networks:
+        return
+    connected = subprocess.run(
+        ["docker", "network", "connect", network, container],
+        capture_output=True,
+        text=True,
+    )
+    if connected.returncode == 0:
+        print(f"  Attached {container} to {network}")
 
 
 def run_compose(directory: Path, *args: str, env: dict[str, str] | None = None) -> None:
@@ -548,6 +1060,58 @@ def stop_legacy_caddy() -> None:
     )
 
 
+def stop_opencloud_caddy() -> None:
+    if subprocess.run(["docker", "inspect", "opencloud_caddy"], capture_output=True).returncode == 0:
+        print("Stopping standalone opencloud_caddy (integrate mode uses easydeploy-engine)…")
+        subprocess.run(["docker", "stop", "opencloud_caddy"], check=False)
+        subprocess.run(["docker", "rm", "opencloud_caddy"], check=False)
+
+
+def destroy_ldap_containers() -> None:
+    """A dead Docker network sandbox cannot be repaired — only replaced."""
+    for name in LDAP_CONTAINER_CANDIDATES:
+        subprocess.run(["docker", "rm", "-f", name], capture_output=True)
+
+
+def pin_ldap_server_after_up(config: dict, env: dict[str, str]) -> None:
+    """After LDAP has an IP, bake ldap-server into OpenCloud extra_hosts and /etc/hosts."""
+    ip = discover_ldap_server_ip()
+    if not ip:
+        print("ldap-server has no usable address; replacing the container…")
+        destroy_ldap_containers()
+        run_compose(COMPOSE_DIR, "up", "-d", "--force-recreate", "--no-deps", "ldap-server", env=env)
+        for _ in range(10):
+            time.sleep(1)
+            ip = discover_ldap_server_ip()
+            if ip:
+                break
+    if not ip:
+        print(
+            "Warning: bundled ldap-server has no address yet; "
+            "OpenCloud will fail lookups for ldap-server.",
+            file=sys.stderr,
+        )
+        return
+    uri = f"ldaps://{ip}:1636"
+    previous_uri = env.get("OC_LDAP_URI", "")
+    env["OC_LDAP_URI"] = uri
+    write_env_file(env, COMPOSE_DIR / ".env")
+    render_network_overlay(config, ldap_ip=ip)
+    if previous_uri != uri:
+        print(f"Pointing OpenCloud at {uri} (Docker /etc/hosts cannot be edited in-place)…")
+        run_compose(
+            COMPOSE_DIR,
+            "up",
+            "-d",
+            "--no-deps",
+            "--force-recreate",
+            "opencloud",
+            env=env,
+        )
+    ensure_container_on_network("opencloud", "opencloud-net")
+    print(f"  OpenCloud LDAP URI is {uri}")
+
+
 def reconcile_runtime(env_path: Path, config: dict) -> None:
     env = {}
     if env_path.is_file():
@@ -558,13 +1122,21 @@ def reconcile_runtime(env_path: Path, config: dict) -> None:
             env[key.strip()] = value.strip()
 
     ensure_docker_network("opencloud-net")
+    if proxy_mode(config) == "integrate":
+        ensure_docker_network(DEFAULT_INTEGRATE_NETWORK)
+        stop_opencloud_caddy()
     stop_legacy_caddy()
 
     print("Pulling OpenCloud stack images…")
     run_compose(COMPOSE_DIR, "pull", env=env)
 
-    print("Starting OpenCloud stack (includes Caddy)…")
+    if proxy_mode(config) == "integrate":
+        print("Starting OpenCloud stack (no local Caddy — use easydeploy-engine)…")
+    else:
+        print("Starting OpenCloud stack (includes Caddy)…")
     run_compose(COMPOSE_DIR, "up", "-d", "--wait", "--force-recreate", env=env)
+    if str((config.get("auth") or {}).get("mode") or "").lower() == "oidc":
+        pin_ldap_server_after_up(config, env)
 
     weboffice = config.get("weboffice") or {}
     if to_bool(weboffice.get("enabled")) and str(weboffice.get("type") or "") == "euro_office":
@@ -586,6 +1158,11 @@ def print_summary(config: dict) -> None:
     if to_bool(weboffice.get("enabled")):
         print(f"  - {weboffice.get('domain')}")
 
+    if proxy_mode(config) == "integrate":
+        print()
+        print(f"Proxy mode: integrate (fragment: {INTEGRATION_CADDY_FRAGMENT})")
+        print("Run easydeploy-engine apply.sh after enabling OpenCloud in engine.yaml.")
+
     auth_mode = str((config.get("auth") or {}).get("mode") or "builtin").lower()
     if auth_mode == "builtin":
         print()
@@ -594,14 +1171,22 @@ def print_summary(config: dict) -> None:
     else:
         oidc = config["auth"]["oidc"]
         print()
-        print("OIDC auth: configure your IdP with these redirect URIs (strict):")
+        print(f"OIDC provider: {oidc.get('provider') or 'external'}")
+        print(f"OIDC issuer:   {oidc.get('issuer_url')}")
+        print(f"OIDC client:   {oidc.get('client_id')}")
+        print("OIDC redirect URIs (strict):")
         print(f"  - https://{domain}/")
+        print(f"  - https://{domain}/web-oidc-callback")
         print(f"  - https://{domain}/oidc-callback.html")
         print(f"  - https://{domain}/oidc-silent-redirect.html")
         print()
-        print("Create IdP groups matching role_mapping in deploy.yaml:")
-        for role, group in (oidc.get("role_mapping") or {}).items():
-            print(f"  - {group} → {role}")
+        if oidc_provider(config) == "kanidm":
+            print("Kanidm assigns the built-in user role at login (proxy driver: default).")
+            print("The first person in opencloud-admin is OC_ADMIN_USER_ID.")
+        else:
+            print("Create IdP groups matching role_mapping in deploy.yaml:")
+            for role, group in (oidc.get("role_mapping") or {}).items():
+                print(f"  - {group} → {role}")
 
 
 def check_docker_available() -> None:
@@ -613,17 +1198,24 @@ def apply(
     *,
     no_reconcile_runtime: bool = False,
     rotate_secrets: bool = False,
+    wipe_local_accounts: bool = False,
 ) -> None:
     check_docker_available()
     config = load_config()
     validate_config(config)
     ensure_compose_submodule()
 
+    if wipe_local_accounts:
+        wipe_local_oidc_accounts(config)
+
     secret_values = create_or_update_secrets(config, rotate=rotate_secrets)
     bootstrap_config(config)
     render_network_overlay(config)
     render_proxy_yaml(config)
-    render_caddyfile(config)
+    if proxy_mode(config) == "integrate":
+        render_integration_fragment(config)
+    else:
+        render_caddyfile(config)
     bootstrap_backup(config, secret_values)
 
     env_vars = build_env_vars(config, secret_values)
@@ -652,14 +1244,20 @@ def main() -> None:
         action="store_true",
         help="Regenerate all secrets (destructive)",
     )
+    parser.add_argument(
+        "--wipe-local-accounts",
+        action="store_true",
+        help="Wipe OpenCloud bundled OpenLDAP users (not Kanidm) before apply",
+    )
     args = parser.parse_args()
 
     try:
         apply(
             no_reconcile_runtime=args.no_reconcile_runtime,
             rotate_secrets=args.rotate_secrets,
+            wipe_local_accounts=args.wipe_local_accounts,
         )
-    except (FileNotFoundError, ValueError, RuntimeError, subprocess.CalledProcessError) as exc:
+    except (FileNotFoundError, ValueError, RuntimeError, subprocess.CalledProcessError, PermissionError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         sys.exit(1)
 

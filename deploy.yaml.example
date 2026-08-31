@@ -4,7 +4,7 @@
 opencloud:
   domain: cloud.example.com
   image: opencloudeu/opencloud-rolling
-  tag: "7.2.0"
+  tag: "7.5.0"
   admin_username: admin
   data_dir: /var/lib/opencloud/data
   config_dir: /var/lib/opencloud/config
@@ -13,27 +13,39 @@ opencloud:
 
 proxy:
   type: caddy
+  mode: standalone
+  integrate:
+    network: easydeploy-net
 
 # auth.mode: builtin — built-in LDAP admin (simple VPS default)
-# auth.mode: oidc   — external IdP (Authentik, Keycloak, etc.)
+# auth.mode: oidc   — Kanidm (same VPS via easydeploy-engine) or another IdP
 auth:
   mode: builtin
   oidc:
-    issuer_url: https://authentik.example.com/application/o/opencloud/
-    account_url: https://authentik.example.com/if/user/
-    domain: authentik.example.com
+    # provider: kanidm  — adds overlays/idm/kanidm-provider.yml when set
+    issuer_url: https://idm.example.com/oauth2/openid/opencloud
+    account_url: https://idm.example.com/
+    domain: idm.example.com
     client_id: opencloud
-    client_scopes: "openid profile email offline_access"
-    role_claim: groups
-    role_mapping:
-      admin: opencloud-admin
-      user: opencloud-user
-      guest: opencloud-guest
+    client_scopes: "openid profile email groups groups_name"
+    # Kanidm uses the default user role at login (plus OC_ADMIN_USER_ID).
+    # Authentik / Keycloak still need role_claim + role_mapping:
+    # role_claim: groups
+    # role_mapping:
+    #   admin: opencloud-admin
+    #   user: opencloud-user
+    #   guest: opencloud-guest
 
 weboffice:
   enabled: true
   type: euro_office
   domain: eurooffice.example.com
+
+# Origins allowed to iframe OpenCloud (Bulwark webmail). On a same-VPS engine
+# install this is filled from bulwark.domain; set it here for standalone or extras.
+# embed:
+#   frame_ancestors:
+#     - https://webmail.example.com
 
 modules:
   search: false
