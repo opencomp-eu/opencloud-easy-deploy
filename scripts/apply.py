@@ -704,13 +704,25 @@ def render_proxy_yaml(config: dict) -> None:
         proxy_path.write_text(upstream_body)
 
 
+def web_office_csp_domain(config: dict) -> str:
+    """Origin allowed in OpenCloud CSP for the document-editor iframe."""
+    weboffice = config.get("weboffice") or {}
+    domain = str(weboffice.get("domain") or "").strip()
+    if to_bool(weboffice.get("enabled")) and domain:
+        return domain
+    return str(config["opencloud"]["domain"])
+
+
 def render_csp_yaml(config: dict) -> None:
     config_dir = Path(str(config["opencloud"]["config_dir"]))
     csp_path = config_dir / "csp.yaml"
     oidc = config["auth"]["oidc"]
     rendered = render_template(
         CSP_TEMPLATE.read_text(),
-        {"IDP_DOMAIN": str(oidc["domain"])},
+        {
+            "IDP_DOMAIN": str(oidc["domain"]),
+            "WEB_OFFICE_DOMAIN": web_office_csp_domain(config),
+        },
     )
     csp_path.write_text(rendered)
 

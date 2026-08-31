@@ -21,9 +21,11 @@ from scripts.apply import (
     ldap_data_dir,
     opencloud_admin_user_id,
     render_caddyfile,
+    render_csp_yaml,
     render_network_overlay,
     render_template,
     validate_config,
+    web_office_csp_domain,
 )
 
 
@@ -434,6 +436,40 @@ def test_render_caddyfile_allows_opencloud_iframe(tmp_path, monkeypatch):
     render_caddyfile(_base_config())
     rendered = caddyfile.read_text()
     assert "frame-ancestors 'self' https://cloud.test.example" in rendered
+
+
+def test_web_office_csp_domain_uses_weboffice_when_enabled():
+    assert web_office_csp_domain(_base_config()) == "eurooffice.test.example"
+
+
+def test_web_office_csp_domain_falls_back_when_disabled():
+    config = _base_config(weboffice={"enabled": False, "type": "euro_office", "domain": "eurooffice.test.example"})
+    assert web_office_csp_domain(config) == "cloud.test.example"
+
+
+def test_render_csp_yaml_allows_euro_office_frame_src(tmp_path):
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    config = _base_config(
+        opencloud={"config_dir": str(config_dir)},
+        auth={
+            "mode": "oidc",
+            "oidc": {
+                "issuer_url": "https://auth.test.example/oauth2/openid/opencloud",
+                "account_url": "https://auth.test.example/",
+                "domain": "auth.test.example",
+                "client_id": "opencloud",
+            },
+        },
+    )
+    render_csp_yaml(config)
+    rendered = (config_dir / "csp.yaml").read_text()
+    assert "https://eurooffice.test.example" in rendered
+    assert "https://auth.test.example" in rendered
+    frame_src = rendered.split("frame-src:")[1].split("img-src:")[0]
+    assert "https://eurooffice.test.example" in frame_src
+    img_src = rendered.split("img-src:")[1].split("manifest-src:")[0]
+    assert "https://eurooffice.test.example" in img_src
 
 
 def test_bootstrap_ldap_tls_creates_cert_files(tmp_path):

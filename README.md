@@ -316,6 +316,8 @@ If OpenCloud logs show `WopiDiscovery: wopi app url failed with unexpected code 
 
 4. **X-Frame-Options / iframe blocked** — If the browser console shows Euro Office blocked by `X-Frame-Options: sameorigin`, re-run `bash apply.sh` so Caddy sets `Content-Security-Policy: frame-ancestors` for the Euro Office domain instead.
 
+5. **OpenCloud `frame-src` blocks Euro Office** — If the browser console shows `frame-src` blocking `https://<euro-office-domain>/hosting/wopi/...`, OpenCloud's CSP is missing the document-server origin. Re-run `bash apply.sh` so `csp.yaml` includes `weboffice.domain`.
+
 Euro Office first boot can take **3–5 minutes** (fonts, caches). `apply.sh` waits for WOPI discovery before restarting OpenCloud.
 
 After updating, recreate the stack (a plain `stop.sh` / `start.sh` is not enough when networking overlays change):
