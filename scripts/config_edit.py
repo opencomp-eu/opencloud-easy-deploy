@@ -129,8 +129,6 @@ def update_from_wizard(
             "client_scopes": (
                 "openid profile email groups groups_name"
                 if (oidc_provider or "").lower() == "kanidm"
-                else "openid profile email groups"
-                if (oidc_provider or "").lower() == "authelia"
                 else "openid profile email offline_access"
             ),
             "role_claim": "groups",

@@ -220,7 +220,7 @@ def test_build_env_vars_kanidm_uses_groups_name_scopes():
         },
     )
     assert env["OC_OIDC_CLIENT_SCOPES"] == "openid profile email groups groups_name"
-    assert env["PROXY_ROLE_ASSIGNMENT_OIDC_CLAIM"] == "opencloudRoles"
+    assert "PROXY_ROLE_ASSIGNMENT_OIDC_CLAIM" not in env
     assert env["PROXY_ROLE_ASSIGNMENT_DRIVER"] == "default"
     assert env["GRAPH_ASSIGN_DEFAULT_USER_ROLE"] == "true"
     assert env["OC_LDAP_DISABLE_USER_MECHANISM"] == "none"

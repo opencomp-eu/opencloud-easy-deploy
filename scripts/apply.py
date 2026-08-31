@@ -164,7 +164,7 @@ def apply_engine_oidc_sidecar(config: dict, sidecar_path: Path | None = None) ->
     if managed_is_false(oidc):
         return
     existing_provider = str(oidc.get("provider") or "").strip().lower()
-    if existing_provider and existing_provider not in {"kanidm", "authelia"}:
+    if existing_provider and existing_provider != "kanidm":
         return
     auth["mode"] = "oidc"
     for key, value in sidecar.items():
@@ -252,8 +252,6 @@ def derive_compose_files(config: dict) -> list[str]:
         provider = str((config.get("auth") or {}).get("oidc", {}).get("provider") or "").lower()
         if provider == "kanidm":
             files.append("../overlays/idm/kanidm-provider.yml")
-        elif provider == "authelia":
-            files.append("../overlays/idm/authelia-provider.yml")
 
     modules = config.get("modules") or {}
     if to_bool(modules.get("search")):
@@ -499,13 +497,10 @@ def build_env_vars(config: dict, secrets: dict[str, str]) -> dict[str, str]:
             env["COLLABORA_SSL_VERIFICATION"] = "true"
 
     if auth_mode == "oidc":
-        role_mapping = oidc.get("role_mapping") or {}
         provider = oidc_provider(config)
         default_scopes = (
             "openid profile email groups groups_name"
             if provider == "kanidm"
-            else "openid profile email groups"
-            if provider == "authelia"
             else "openid profile email offline_access"
         )
         kanidm = provider == "kanidm"
@@ -517,9 +512,6 @@ def build_env_vars(config: dict, secrets: dict[str, str]) -> dict[str, str]:
                 "IDP_DOMAIN": str(oidc["domain"]),
                 "IDP_ISSUER_URL": str(oidc["issuer_url"]),
                 "IDP_ACCOUNT_URL": str(oidc["account_url"]),
-                "PROXY_ROLE_ASSIGNMENT_OIDC_CLAIM": str(
-                    oidc.get("role_claim") or "groups"
-                ),
                 "OC_OIDC_CLIENT_ID": str(oidc["client_id"]),
                 "OC_OIDC_CLIENT_SCOPES": str(
                     oidc.get("client_scopes") or default_scopes
@@ -532,7 +524,10 @@ def build_env_vars(config: dict, secrets: dict[str, str]) -> dict[str, str]:
             env["OC_ADMIN_USER_ID"] = opencloud_admin_user_id(config)
             env["SETTINGS_SETUP_DEFAULT_ASSIGNMENTS"] = "true"
             env["OC_LDAP_DISABLE_USER_MECHANISM"] = "none"
-        env["_ROLE_MAPPING"] = yaml.safe_dump(role_mapping, default_flow_style=True)
+        else:
+            env["PROXY_ROLE_ASSIGNMENT_OIDC_CLAIM"] = str(
+                oidc.get("role_claim") or "groups"
+            )
 
     return env
 
@@ -1060,9 +1055,13 @@ def print_summary(config: dict) -> None:
         print(f"  - https://{domain}/oidc-callback.html")
         print(f"  - https://{domain}/oidc-silent-redirect.html")
         print()
-        print("Create IdP groups matching role_mapping in deploy.yaml:")
-        for role, group in (oidc.get("role_mapping") or {}).items():
-            print(f"  - {group} → {role}")
+        if oidc_provider(config) == "kanidm":
+            print("Kanidm assigns the built-in user role at login (proxy driver: default).")
+            print("The first person in opencloud-admin is OC_ADMIN_USER_ID.")
+        else:
+            print("Create IdP groups matching role_mapping in deploy.yaml:")
+            for role, group in (oidc.get("role_mapping") or {}).items():
+                print(f"  - {group} → {role}")
 
 
 def check_docker_available() -> None:

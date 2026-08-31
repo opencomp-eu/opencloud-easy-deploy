@@ -24,14 +24,9 @@ auth:
     domain: idm.example.com
     client_id: opencloud
     client_scopes: openid profile email groups groups_name
-    role_claim: opencloudRoles
-    role_mapping:
-      admin: admin
-      user: user
-      guest: guest
 ```
 
-Kanidm uses a **per-client** issuer (`/oauth2/openid/<client_id>`), not the portal origin.
+Kanidm uses a **per-client** issuer (`/oauth2/openid/<client_id>`), not the portal origin. Role assignment uses the default `user` role at login (`PROXY_ROLE_ASSIGNMENT_DRIVER=default`); put the operator in Kanidm group `opencloud-admin` so they become `OC_ADMIN_USER_ID`. Do not rely on `role_claim` / `opencloudRoles` for Kanidm.
 
 ## Kanidm OIDC client
 
@@ -51,6 +46,5 @@ Give your user the `opencloud-admin` group in Kanidm, not by creating a local Op
 
 Do not use `--skip-kits` for the initial identity wiring: that writes sidecars
 but does not register the client or restart OpenCloud.
-5. `bash apply.sh` in easydeploy-engine.
 
 Standalone OpenCloud Caddy (`opencloud_caddy`) is not started in integrate mode.
