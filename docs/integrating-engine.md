@@ -48,3 +48,7 @@ Do not use `--skip-kits` for the initial identity wiring: that writes sidecars
 but does not register the client or restart OpenCloud.
 
 Standalone OpenCloud Caddy (`opencloud_caddy`) is not started in integrate mode.
+
+## Bulwark inline iframe
+
+When Stalwart/Bulwark is enabled on the same engine, apply writes `.opencloud-easy-deploy/integration/embed.yaml` with the webmail origin. OpenCloud then allows that origin in CSP `frame-ancestors`. To add more parents, set `embed.frame_ancestors` in `deploy.yaml`. Set `embed.managed: false` to ignore the engine sidecar.

@@ -41,6 +41,12 @@ weboffice:
   type: euro_office
   domain: eurooffice.example.com
 
+# Origins allowed to iframe OpenCloud (Bulwark webmail). On a same-VPS engine
+# install this is filled from bulwark.domain; set it here for standalone or extras.
+# embed:
+#   frame_ancestors:
+#     - https://webmail.example.com
+
 modules:
   search: false
   antivirus: false

@@ -34,7 +34,15 @@ DEPLOY_PATH = PROJECT_ROOT / "deploy.yaml"
 NETWORK_OVERLAY_PATH = STATE_DIR / "compose" / "network-fixups.yml"
 INTEGRATION_DIR = STATE_DIR / "integration"
 INTEGRATION_CADDY_FRAGMENT = INTEGRATION_DIR / "caddy.caddy"
+EMBED_SIDECAR = INTEGRATION_DIR / "embed.yaml"
 DEFAULT_INTEGRATE_NETWORK = "easydeploy-net"
+PLACEHOLDER_EMBED_HOSTS = frozenset(
+    {
+        "webmail.example.com",
+        "example.com",
+        "mail.example.com",
+    }
+)
 BITNAMI_OPENLDAP_UID = 1001
 # Bitnami OpenLDAP runs as uid 1001 and needs gid 0 to write slapd.ldif
 # into the bind-mounted /opt/bitnami/openldap/share (our ldap_certs dir).
@@ -174,6 +182,69 @@ def apply_engine_oidc_sidecar(config: dict, sidecar_path: Path | None = None) ->
     oidc["provider"] = "kanidm"
 
 
+def https_origin(value: Any) -> str:
+    """Normalize a hostname or URL to `https://host` with no trailing slash."""
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if "://" in text:
+        scheme, rest = text.split("://", 1)
+        if scheme.lower() not in {"http", "https"}:
+            return ""
+        host = rest.split("/")[0].split("?")[0].split("#")[0].strip().lower()
+    else:
+        host = text.split("/")[0].split("?")[0].split("#")[0].strip().lower()
+    if not host or host in PLACEHOLDER_EMBED_HOSTS:
+        return ""
+    return f"https://{host}"
+
+
+def unique_https_origins(values: Any) -> list[str]:
+    origins: list[str] = []
+    seen: set[str] = set()
+    if isinstance(values, str):
+        values = [values]
+    if not isinstance(values, list):
+        return origins
+    for item in values:
+        origin = https_origin(item)
+        if origin and origin not in seen:
+            seen.add(origin)
+            origins.append(origin)
+    return origins
+
+
+def apply_engine_embed_sidecar(config: dict, sidecar_path: Path | None = None) -> None:
+    """Merge extra frame-ancestors from the engine sidecar (Bulwark webmail)."""
+    path = sidecar_path or EMBED_SIDECAR
+    embed = config.get("embed")
+    if embed is None:
+        embed = {}
+    elif not isinstance(embed, dict):
+        return
+    if managed_is_false(embed):
+        return
+    extra: list[Any] = []
+    if path.is_file():
+        sidecar = load_yaml(path)
+        if isinstance(sidecar, dict):
+            extra = sidecar.get("frame_ancestors") or []
+    current = embed.get("frame_ancestors") or []
+    merged = unique_https_origins(list(current) + list(extra))
+    if merged:
+        target = config.setdefault("embed", {})
+        if isinstance(target, dict):
+            target["frame_ancestors"] = merged
+
+
+def extra_frame_ancestors(config: dict) -> list[str]:
+    embed = config.get("embed") or {}
+    if not isinstance(embed, dict):
+        return []
+    self_origin = https_origin(config.get("opencloud", {}).get("domain"))
+    return [origin for origin in unique_https_origins(embed.get("frame_ancestors")) if origin != self_origin]
+
+
 def load_config(path: Path = DEPLOY_PATH) -> dict:
     if not path.exists():
         raise FileNotFoundError(
@@ -181,6 +252,7 @@ def load_config(path: Path = DEPLOY_PATH) -> dict:
         )
     config = load_yaml(path)
     apply_engine_oidc_sidecar(config)
+    apply_engine_embed_sidecar(config)
     return config
 
 
@@ -220,6 +292,17 @@ def validate_config(config: dict) -> None:
             raise ValueError("weboffice.type must be 'euro_office' or 'collabora'")
         if not str(weboffice.get("domain") or "").strip():
             raise ValueError("weboffice.domain is required when weboffice is enabled")
+
+    embed = config.get("embed")
+    if embed is not None:
+        if not isinstance(embed, dict):
+            raise ValueError("embed must be a mapping")
+        ancestors = embed.get("frame_ancestors")
+        if ancestors is not None:
+            if isinstance(ancestors, str):
+                ancestors = [ancestors]
+            if not isinstance(ancestors, list) or any(not str(item or "").strip() for item in ancestors):
+                raise ValueError("embed.frame_ancestors must be a list of hostnames or https origins")
 
     validate_backup_config(config)
     proxy_mode(config)
@@ -699,9 +782,9 @@ def render_proxy_yaml(config: dict) -> None:
     if auth_mode == "oidc":
         role_block = build_proxy_role_block(config)
         proxy_path.write_text(f"{role_block.rstrip()}\n{upstream_body.lstrip()}")
-        render_csp_yaml(config)
     elif not proxy_path.exists():
         proxy_path.write_text(upstream_body)
+    render_csp_yaml(config)
 
 
 def web_office_csp_domain(config: dict) -> str:
@@ -713,15 +796,24 @@ def web_office_csp_domain(config: dict) -> str:
     return str(config["opencloud"]["domain"])
 
 
+def frame_ancestors_extra_yaml(origins: list[str]) -> str:
+    if not origins:
+        return ""
+    return "\n" + "\n".join(f"    - '{origin}'" for origin in origins)
+
+
 def render_csp_yaml(config: dict) -> None:
     config_dir = Path(str(config["opencloud"]["config_dir"]))
+    config_dir.mkdir(parents=True, exist_ok=True)
     csp_path = config_dir / "csp.yaml"
-    oidc = config["auth"]["oidc"]
+    oidc = ((config.get("auth") or {}).get("oidc") or {})
+    idp_domain = str(oidc.get("domain") or config["opencloud"]["domain"]).strip()
     rendered = render_template(
         CSP_TEMPLATE.read_text(),
         {
-            "IDP_DOMAIN": str(oidc["domain"]),
+            "IDP_DOMAIN": idp_domain,
             "WEB_OFFICE_DOMAIN": web_office_csp_domain(config),
+            "FRAME_ANCESTORS_EXTRA": frame_ancestors_extra_yaml(extra_frame_ancestors(config)),
         },
     )
     csp_path.write_text(rendered)
@@ -731,13 +823,21 @@ def build_caddy_site_blocks(config: dict) -> tuple[str, str]:
     opencloud_domain = str(config["opencloud"]["domain"])
     weboffice = config.get("weboffice") or {}
 
-    oc_security_headers = """
-    header {
+    extra_ancestors = extra_frame_ancestors(config)
+    if extra_ancestors:
+        frame_header = "        -X-Frame-Options"
+        proxy_down = "        header_down -X-Frame-Options\n"
+    else:
+        frame_header = "        X-Frame-Options SAMEORIGIN"
+        proxy_down = ""
+
+    oc_security_headers = f"""
+    header {{
         X-Content-Type-Options nosniff
-        X-Frame-Options SAMEORIGIN
+{frame_header}
         Referrer-Policy strict-origin-when-cross-origin
         -Server
-    }
+    }}
     encode gzip
     log"""
 
@@ -745,7 +845,7 @@ def build_caddy_site_blocks(config: dict) -> tuple[str, str]:
     reverse_proxy opencloud:9200 {{
         header_up X-Forwarded-Proto {{scheme}}
         header_up X-Forwarded-Host {{host}}
-    }}{oc_security_headers}
+{proxy_down}    }}{oc_security_headers}
 }}"""
 
     euro_block = ""

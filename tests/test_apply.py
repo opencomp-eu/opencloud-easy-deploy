@@ -12,12 +12,15 @@ import yaml
 
 from scripts.apply import (
     _network_address,
+    apply_engine_embed_sidecar,
     apply_engine_oidc_sidecar,
     bootstrap_ldap_tls,
+    build_caddy_site_blocks,
     build_env_vars,
     build_proxy_role_block,
     derive_compose_files,
     discover_ldap_server_ip,
+    extra_frame_ancestors,
     ldap_data_dir,
     opencloud_admin_user_id,
     render_caddyfile,
@@ -470,6 +473,53 @@ def test_render_csp_yaml_allows_euro_office_frame_src(tmp_path):
     assert "https://eurooffice.test.example" in frame_src
     img_src = rendered.split("img-src:")[1].split("manifest-src:")[0]
     assert "https://eurooffice.test.example" in img_src
+
+
+def test_render_csp_yaml_allows_webmail_frame_ancestors(tmp_path):
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    config = _base_config(
+        opencloud={"config_dir": str(config_dir)},
+        embed={"frame_ancestors": ["webmail.test.example"]},
+    )
+    render_csp_yaml(config)
+    rendered = (config_dir / "csp.yaml").read_text()
+    ancestors = rendered.split("frame-ancestors:")[1].split("frame-src:")[0]
+    assert "https://webmail.test.example" in ancestors
+    assert "'''self'''" in ancestors
+
+
+def test_caddy_drops_x_frame_options_when_embed_parents_set():
+    oc_block, _euro = build_caddy_site_blocks(
+        _base_config(embed={"frame_ancestors": ["https://webmail.test.example"]})
+    )
+    assert "X-Frame-Options SAMEORIGIN" not in oc_block
+    assert "header_down -X-Frame-Options" in oc_block
+    assert "-X-Frame-Options" in oc_block
+
+
+def test_caddy_keeps_sameorigin_without_embed_parents():
+    oc_block, _euro = build_caddy_site_blocks(_base_config())
+    assert "X-Frame-Options SAMEORIGIN" in oc_block
+
+
+def test_apply_engine_embed_sidecar_merges_origins(tmp_path):
+    sidecar = tmp_path / "embed.yaml"
+    sidecar.write_text("frame_ancestors:\n  - https://webmail.test.example\n")
+    config = {"opencloud": {"domain": "cloud.test.example"}, "embed": {"frame_ancestors": ["portal.test.example"]}}
+    apply_engine_embed_sidecar(config, sidecar)
+    assert extra_frame_ancestors(config) == [
+        "https://portal.test.example",
+        "https://webmail.test.example",
+    ]
+
+
+def test_apply_engine_embed_sidecar_respects_managed_false(tmp_path):
+    sidecar = tmp_path / "embed.yaml"
+    sidecar.write_text("frame_ancestors:\n  - https://webmail.test.example\n")
+    config = {"opencloud": {"domain": "cloud.test.example"}, "embed": {"managed": False}}
+    apply_engine_embed_sidecar(config, sidecar)
+    assert extra_frame_ancestors(config) == []
 
 
 def test_bootstrap_ldap_tls_creates_cert_files(tmp_path):

@@ -318,6 +318,8 @@ If OpenCloud logs show `WopiDiscovery: wopi app url failed with unexpected code 
 
 5. **OpenCloud `frame-src` blocks Euro Office** — If the browser console shows `frame-src` blocking `https://<euro-office-domain>/hosting/wopi/...`, OpenCloud's CSP is missing the document-server origin. Re-run `bash apply.sh` so `csp.yaml` includes `weboffice.domain`.
 
+6. **Bulwark inline iframe blocked (`frame-ancestors 'self'`)** — OpenCloud refuses to load inside webmail until `embed.frame_ancestors` includes the Bulwark origin. On a same-VPS engine install, re-run `bash apply.sh` in easydeploy-engine so it writes the embed sidecar from `bulwark.domain`. Standalone: set `embed.frame_ancestors: ["https://webmail.example.com"]` in `deploy.yaml` and re-apply.
+
 Euro Office first boot can take **3–5 minutes** (fonts, caches). `apply.sh` waits for WOPI discovery before restarting OpenCloud.
 
 After updating, recreate the stack (a plain `stop.sh` / `start.sh` is not enough when networking overlays change):
