@@ -51,4 +51,4 @@ Standalone OpenCloud Caddy (`opencloud_caddy`) is not started in integrate mode.
 
 ## Bulwark inline iframe
 
-When Stalwart/Bulwark is enabled on the same engine, apply writes `.opencloud-easy-deploy/integration/embed.yaml` with the webmail origin. OpenCloud then allows that origin in CSP `frame-ancestors`. To add more parents, set `embed.frame_ancestors` in `deploy.yaml`. Set `embed.managed: false` to ignore the engine sidecar.
+When Stalwart/Bulwark is enabled on the same engine, apply writes `.opencloud-easy-deploy/integration/embed.yaml` with the webmail origin. OpenCloud then allows that origin in CSP `frame-ancestors`, and the document editor (Euro Office / Collabora) allows it too so nested iframes work. To add more parents, set `embed.frame_ancestors` in `deploy.yaml`. Set `embed.managed: false` to ignore the engine sidecar.

@@ -22,6 +22,7 @@ from scripts.apply import (
     discover_ldap_server_ip,
     extra_frame_ancestors,
     ldap_data_dir,
+    office_frame_ancestors_csp,
     opencloud_admin_user_id,
     render_caddyfile,
     render_csp_yaml,
@@ -499,8 +500,28 @@ def test_caddy_drops_x_frame_options_when_embed_parents_set():
 
 
 def test_caddy_keeps_sameorigin_without_embed_parents():
-    oc_block, _euro = build_caddy_site_blocks(_base_config())
+    oc_block, euro_block = build_caddy_site_blocks(_base_config())
     assert "X-Frame-Options SAMEORIGIN" in oc_block
+    assert "frame-ancestors 'self' https://cloud.test.example" in euro_block
+    assert "webmail.test.example" not in euro_block
+
+
+def test_office_caddy_allows_webmail_nested_iframe():
+    _oc, euro_block = build_caddy_site_blocks(
+        _base_config(embed={"frame_ancestors": ["https://webmail.test.example"]})
+    )
+    assert (
+        "frame-ancestors 'self' https://cloud.test.example https://webmail.test.example"
+        in euro_block
+    )
+    assert "header_down -Content-Security-Policy" in euro_block
+
+
+def test_office_frame_ancestors_csp_dedupes_opencloud_origin():
+    config = _base_config(embed={"frame_ancestors": ["cloud.test.example", "webmail.test.example"]})
+    assert office_frame_ancestors_csp(config) == (
+        "'self' https://cloud.test.example https://webmail.test.example"
+    )
 
 
 def test_apply_engine_embed_sidecar_merges_origins(tmp_path):

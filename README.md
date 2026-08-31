@@ -314,7 +314,7 @@ If OpenCloud logs show `WopiDiscovery: wopi app url failed with unexpected code 
 
 3. **JWT mismatch** — Euro Office `JWT_SECRET` must match OpenCloud `COLLABORATION_WOPI_SECRET` (not `COLLABORATION_JWT_SECRET`, which breaks internal REVA tokens). Both are set from `.opencloud-easy-deploy/secrets.yaml` on apply. If JWT was wrong on first boot, remove `<data-root>/euro-office` and re-apply so Euro Office regenerates its persisted secrets.
 
-4. **X-Frame-Options / iframe blocked** — If the browser console shows Euro Office blocked by `X-Frame-Options: sameorigin`, re-run `bash apply.sh` so Caddy sets `Content-Security-Policy: frame-ancestors` for the Euro Office domain instead.
+4. **X-Frame-Options / iframe blocked** — If the browser console shows Euro Office blocked by `X-Frame-Options: sameorigin`, re-run `bash apply.sh` so Caddy sets `Content-Security-Policy: frame-ancestors` for the Euro Office domain instead. Opening a document while OpenCloud itself is iframed (Bulwark) also needs the webmail origin in that list; engine apply writes it from `bulwark.domain`.
 
 5. **OpenCloud `frame-src` blocks Euro Office** — If the browser console shows `frame-src` blocking `https://<euro-office-domain>/hosting/wopi/...`, OpenCloud's CSP is missing the document-server origin. Re-run `bash apply.sh` so `csp.yaml` includes `weboffice.domain`.
 

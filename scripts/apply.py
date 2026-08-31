@@ -245,6 +245,17 @@ def extra_frame_ancestors(config: dict) -> list[str]:
     return [origin for origin in unique_https_origins(embed.get("frame_ancestors")) if origin != self_origin]
 
 
+def office_frame_ancestors_csp(config: dict) -> str:
+    """CSP frame-ancestors for the document editor (nested iframes check every ancestor)."""
+    parts = ["'self'", f"https://{config['opencloud']['domain']}"]
+    seen = set(parts)
+    for origin in extra_frame_ancestors(config):
+        if origin not in seen:
+            seen.add(origin)
+            parts.append(origin)
+    return " ".join(parts)
+
+
 def load_config(path: Path = DEPLOY_PATH) -> dict:
     if not path.exists():
         raise FileNotFoundError(
@@ -857,17 +868,19 @@ def build_caddy_site_blocks(config: dict) -> tuple[str, str]:
             else "collabora:9980"
         )
         if office_domain:
+            ancestors = office_frame_ancestors_csp(config)
             euro_block = f"""
 {office_domain} {{
     reverse_proxy {upstream} {{
         header_down -X-Frame-Options
+        header_down -Content-Security-Policy
     }}
     header {{
         X-Content-Type-Options nosniff
         Referrer-Policy strict-origin-when-cross-origin
         -Server
         -X-Frame-Options
-        Content-Security-Policy "frame-ancestors 'self' https://{opencloud_domain}"
+        Content-Security-Policy "frame-ancestors {ancestors}"
     }}
     encode gzip
     log
