@@ -20,11 +20,12 @@ from scripts.backup import (
     backup_secret_keys,
     bootstrap_backup,
     print_backup_summary,
-    validate_backup_config,
+    validate_backup_config as validate_legacy_backup_config,
 )
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT / "easydeploy-lib" / "python"))
+import backup_config  # noqa: E402
 import hostfs  # noqa: E402
 
 COMPOSE_DIR = PROJECT_ROOT / "opencloud-compose"
@@ -315,7 +316,7 @@ def validate_config(config: dict) -> None:
             if not isinstance(ancestors, list) or any(not str(item or "").strip() for item in ancestors):
                 raise ValueError("embed.frame_ancestors must be a list of hostnames or https origins")
 
-    validate_backup_config(config)
+    validate_legacy_backup_config(config)
     proxy_mode(config)
 
 
@@ -1194,6 +1195,32 @@ def check_docker_available() -> None:
         raise RuntimeError("Docker is not installed or not in PATH")
 
 
+def validate_backup_config(config_path: Path = DEPLOY_PATH) -> None:
+    """Validate the shared backup block, including encryption and SFTP settings."""
+    if config_path.is_file():
+        backup_config.load_backup_settings(config_path)
+
+
+def reconcile_backup_schedule() -> None:
+    """Install or remove the shared systemd backup timer after apply."""
+    try:
+        result = subprocess.run(
+            ["bash", str(PROJECT_ROOT / "backup.sh"), "--schedule"],
+            cwd=PROJECT_ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as exc:
+        detail = getattr(exc, "stderr", "") or str(exc)
+        print(f"Backup schedule: {detail.strip()}", file=sys.stderr)
+        return
+    message = result.stdout.strip() or "Automatic backup timer reconciled."
+    if result.stderr.strip():
+        print(result.stderr.strip(), file=sys.stderr)
+    print(f"Backup schedule: {message}")
+
+
 def apply(
     *,
     no_reconcile_runtime: bool = False,
@@ -1203,6 +1230,7 @@ def apply(
     check_docker_available()
     config = load_config()
     validate_config(config)
+    validate_backup_config()
     ensure_compose_submodule()
 
     if wipe_local_accounts:
@@ -1230,6 +1258,7 @@ def apply(
 
     print_summary(config)
     print_backup_summary(config)
+    reconcile_backup_schedule()
 
 
 def main() -> None:

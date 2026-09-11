@@ -45,7 +45,8 @@ bash apply.sh
 | `bash backup-bundle.sh` | Portable `.tar.gz` for VPS migration |
 | `bash restore-bundle.sh` | Restore from portable bundle on a fresh VPS |
 | `bash restore-borg.sh` | Restore from Borg (local or SFTP) on a fresh VPS |
-| `bash backup.sh` | Run Borg backup now (when `backup.enabled`) |
+| `bash backup.sh` | Run shared Borg/portable backup now (when `backup.enabled`) |
+| `bash bootstrap-from-backup.sh` | Restore portable backup on a fresh VPS |
 | `bash restore.sh` | List or restore from Borg archives |
 | `bash uninstall.sh` | Remove generated runtime files (keeps data) |
 
@@ -180,6 +181,12 @@ cd opencloud-easy-deploy
 bash restore-bundle.sh /path/to/opencloud-backup-*.tar.gz
 ```
 
+New shared portable exports can also be restored with:
+
+```bash
+bash bootstrap-from-backup.sh /path/to/backup.tar.gz --yes
+```
+
 That one command installs Docker, uv, restores all data/config/secrets, and runs `apply.sh`. Point DNS at the new server before visiting the URL.
 
 The bundle contains **passwords and keys** — treat it like a secrets backup.
@@ -233,9 +240,9 @@ backup:
     keep_monthly: 6
 ```
 
-Each backup archive includes OpenCloud data, `deploy.yaml`, and `secrets.yaml` — restore pulls configuration from the archive, not a separate bootstrap file.
+Each shared backup archive includes OpenCloud data, `deploy.yaml`, and `secrets.yaml` — restore pulls configuration from the archive, not a separate bootstrap file. The legacy `backup-bundle.sh` / `restore-bundle.sh` format remains supported.
 
-Then run `bash apply.sh` to generate backup config and a `BORG_PASSPHRASE` in `.opencloud-easy-deploy/secrets.yaml`. Store the passphrase and SSH private key safely off-site.
+Then run `bash apply.sh` to generate a `BORG_PASSPHRASE` in `.opencloud-easy-deploy/secrets.yaml`; the shared backup entrypoint reads that secret and applies the configured repository, retention, and passphrase wiring. Store the passphrase and SSH private key safely off-site.
 
 **Run a backup now:**
 
@@ -277,13 +284,13 @@ bash restore-borg.sh
 
 Backups include OpenCloud data/config/apps, LDAP state (if OIDC), Euro Office data, `deploy.yaml`, and `secrets.yaml`.
 
-For scheduled backups, `apply.sh` writes systemd unit files to `.opencloud-easy-deploy/backup/systemd/`. Install them:
+For scheduled backups, reconcile the shared systemd timer after `apply.sh`:
 
 ```bash
-sudo cp .opencloud-easy-deploy/backup/systemd/opencloud-backup.* /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now opencloud-backup.timer
+bash backup.sh --schedule
 ```
+
+This installs `opencloud-easy-deploy-backup.service` and `.timer` when enabled, and removes them when disabled. The timer invokes the same shared `backup.sh` path as an on-demand backup.
 
 Store the Borg passphrase and SSH key safely off-site — without them, backups cannot be restored. For local repos, sync `/var/backups/opencloud` elsewhere or use `backup-bundle.sh` periodically. For SFTP, the remote repository *is* your off-site copy.
 

@@ -315,9 +315,10 @@ def render_systemd_units(config: dict) -> None:
     SYSTEMD_DIR.mkdir(parents=True, exist_ok=True)
     backup_sh = (PROJECT_ROOT / "backup.sh").resolve()
     persistent = "true" if settings["schedule_persistent"] else "false"
+    timer_name = "opencloud-easy-deploy-backup"
 
     service = f"""[Unit]
-Description=OpenCloud Borg backup
+Description=OpenCloud Easy Deploy backup
 Wants=network-online.target
 After=network-online.target docker.service
 
@@ -327,17 +328,18 @@ WorkingDirectory={PROJECT_ROOT}
 ExecStart={backup_sh}
 """
     timer = f"""[Unit]
-Description=OpenCloud Borg backup schedule
+Description=OpenCloud Easy Deploy backup schedule
 
 [Timer]
 OnCalendar={settings['schedule_calendar']}
 Persistent={persistent}
+Unit={timer_name}.service
 
 [Install]
 WantedBy=timers.target
 """
-    (SYSTEMD_DIR / "opencloud-backup.service").write_text(service)
-    (SYSTEMD_DIR / "opencloud-backup.timer").write_text(timer)
+    (SYSTEMD_DIR / f"{timer_name}.service").write_text(service)
+    (SYSTEMD_DIR / f"{timer_name}.timer").write_text(timer)
 
 
 def bootstrap_secrets_only_restore(config: dict, secrets: dict[str, str]) -> None:
