@@ -146,6 +146,18 @@ if [[ -n "$OC_DOMAIN" ]]; then
 	section "Public HTTPS: OpenCloud"
 	code="$(http_code "https://${OC_DOMAIN}/")"
 	echo "  https://${OC_DOMAIN}/ → HTTP ${code}"
+	if [[ -n "$EURO_DOMAIN" ]]; then
+		oc_headers="$(curl -k -sSI "https://${OC_DOMAIN}/" 2>/dev/null || true)"
+		oc_csp="$(echo "$oc_headers" | grep -i '^content-security-policy:' || true)"
+		if echo "$oc_csp" | grep -qi "frame-src" && echo "$oc_csp" | grep -qi "$EURO_DOMAIN"; then
+			success "OpenCloud CSP frame-src allows ${EURO_DOMAIN}"
+		elif echo "$oc_csp" | grep -qi "frame-src"; then
+			error "OpenCloud CSP frame-src does not allow ${EURO_DOMAIN} — document editor iframe will be blocked. Re-run apply.sh"
+			echo "  ${oc_csp}"
+		else
+			warn "OpenCloud CSP frame-src not found on ${OC_DOMAIN} response"
+		fi
+	fi
 fi
 
 section "Recent OpenCloud collaboration errors"

@@ -9,7 +9,7 @@ This replaces the official test installer (`curl -L https://opencloud.eu/install
 **Requirements:** Linux VPS, Docker Compose v2, DNS pointing at the server, ports 80/443 open.
 
 ```bash
-git clone --recurse-submodules https://github.com/your-org/opencloud-easy-deploy.git
+git clone --recurse-submodules https://github.com/opencomp-eu/opencloud-easy-deploy.git
 cd opencloud-easy-deploy
 bash ensure-dependencies.sh   # Docker, uv, submodules, Python deps
 bash wizard.sh                # interactive: writes deploy.yaml and deploys
@@ -45,7 +45,8 @@ bash apply.sh
 | `bash backup-bundle.sh` | Portable `.tar.gz` for VPS migration |
 | `bash restore-bundle.sh` | Restore from portable bundle on a fresh VPS |
 | `bash restore-borg.sh` | Restore from Borg (local or SFTP) on a fresh VPS |
-| `bash backup.sh` | Run Borg backup now (when `backup.enabled`) |
+| `bash backup.sh` | Run shared Borg/portable backup now (when `backup.enabled`) |
+| `bash bootstrap-from-backup.sh` | Restore portable backup on a fresh VPS |
 | `bash restore.sh` | List or restore from Borg archives |
 | `bash uninstall.sh` | Remove generated runtime files (keeps data) |
 
@@ -54,7 +55,7 @@ bash apply.sh
 See [`deploy.yaml.example`](deploy.yaml.example). Key sections:
 
 - **opencloud** — domain, image tag, persistent `data_dir` / `config_dir` / `apps_dir`
-- **proxy** — `caddy` (only option in v1)
+- **proxy** — `caddy` with `mode: standalone` (default) or `integrate` (shared Caddy via [easydeploy-engine](../easydeploy-engine))
 - **auth** — `builtin` (simple admin login) or `oidc` (external IdP)
 - **weboffice** — `euro_office` or `collabora` (mutually exclusive with each other)
 - **modules** — optional search, antivirus, radicale, monitoring
@@ -69,6 +70,8 @@ Uses OpenCloud's built-in LDAP. Admin password is generated on first `apply.sh` 
 ### External OIDC (Authentik, Keycloak, …)
 
 Set `auth.mode: oidc` and configure `auth.oidc` in `deploy.yaml`. The stack adds `idm/external-idp.yml` plus a local overlay for role mapping via `proxy.yaml`.
+
+**Kanidm** (same VPS) uses overlay `overlays/idm/kanidm-provider.yml` instead: default role driver, not OIDC claim mapping. See [`docs/integrating-engine.md`](docs/integrating-engine.md). For a standalone clone, run `bash wizard.sh` here, or let [easydeploy-engine](../easydeploy-engine) wire both kits.
 
 #### Authentik setup
 
@@ -129,7 +132,7 @@ Internet → Caddy (:443, Let's Encrypt)
 opencloud-compose stack (docker network: opencloud-net)
   ├── opencloud
   ├── euro-office (optional)
-  ├── ldap-server (OIDC mode only)
+  ├── ldap-server (OIDC mode only — OpenCloud's local user/graph store, not the IdP)
   └── optional modules (tika, clamav, …)
 ```
 
@@ -176,6 +179,12 @@ Copy that single file to your new VPS (scp, rsync, object storage, etc.).
 git clone <repo> opencloud-easy-deploy
 cd opencloud-easy-deploy
 bash restore-bundle.sh /path/to/opencloud-backup-*.tar.gz
+```
+
+New shared portable exports can also be restored with:
+
+```bash
+bash bootstrap-from-backup.sh /path/to/backup.tar.gz --yes
 ```
 
 That one command installs Docker, uv, restores all data/config/secrets, and runs `apply.sh`. Point DNS at the new server before visiting the URL.
@@ -231,9 +240,9 @@ backup:
     keep_monthly: 6
 ```
 
-Each backup archive includes OpenCloud data, `deploy.yaml`, and `secrets.yaml` — restore pulls configuration from the archive, not a separate bootstrap file.
+Each shared backup archive includes OpenCloud data, `deploy.yaml`, and `secrets.yaml` — restore pulls configuration from the archive, not a separate bootstrap file. The legacy `backup-bundle.sh` / `restore-bundle.sh` format remains supported.
 
-Then run `bash apply.sh` to generate backup config and a `BORG_PASSPHRASE` in `.opencloud-easy-deploy/secrets.yaml`. Store the passphrase and SSH private key safely off-site.
+Then run `bash apply.sh` to generate a `BORG_PASSPHRASE` in `.opencloud-easy-deploy/secrets.yaml`; the shared backup entrypoint reads that secret and applies the configured repository, retention, and passphrase wiring. Store the passphrase and SSH private key safely off-site.
 
 **Run a backup now:**
 
@@ -275,13 +284,13 @@ bash restore-borg.sh
 
 Backups include OpenCloud data/config/apps, LDAP state (if OIDC), Euro Office data, `deploy.yaml`, and `secrets.yaml`.
 
-For scheduled backups, `apply.sh` writes systemd unit files to `.opencloud-easy-deploy/backup/systemd/`. Install them:
+For scheduled backups, reconcile the shared systemd timer after `apply.sh`:
 
 ```bash
-sudo cp .opencloud-easy-deploy/backup/systemd/opencloud-backup.* /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now opencloud-backup.timer
+bash backup.sh --schedule
 ```
+
+This installs `opencloud-easy-deploy-backup.service` and `.timer` when enabled, and removes them when disabled. The timer invokes the same shared `backup.sh` path as an on-demand backup.
 
 Store the Borg passphrase and SSH key safely off-site — without them, backups cannot be restored. For local repos, sync `/var/backups/opencloud` elsewhere or use `backup-bundle.sh` periodically. For SFTP, the remote repository *is* your off-site copy.
 
@@ -312,7 +321,11 @@ If OpenCloud logs show `WopiDiscovery: wopi app url failed with unexpected code 
 
 3. **JWT mismatch** — Euro Office `JWT_SECRET` must match OpenCloud `COLLABORATION_WOPI_SECRET` (not `COLLABORATION_JWT_SECRET`, which breaks internal REVA tokens). Both are set from `.opencloud-easy-deploy/secrets.yaml` on apply. If JWT was wrong on first boot, remove `<data-root>/euro-office` and re-apply so Euro Office regenerates its persisted secrets.
 
-4. **X-Frame-Options / iframe blocked** — If the browser console shows Euro Office blocked by `X-Frame-Options: sameorigin`, re-run `bash apply.sh` so Caddy sets `Content-Security-Policy: frame-ancestors` for the Euro Office domain instead.
+4. **X-Frame-Options / iframe blocked** — If the browser console shows Euro Office blocked by `X-Frame-Options: sameorigin`, re-run `bash apply.sh` so Caddy sets `Content-Security-Policy: frame-ancestors` for the Euro Office domain instead. Opening a document while OpenCloud itself is iframed (Bulwark) also needs the webmail origin in that list; engine apply writes it from `bulwark.domain`.
+
+5. **OpenCloud `frame-src` blocks Euro Office** — If the browser console shows `frame-src` blocking `https://<euro-office-domain>/hosting/wopi/...`, OpenCloud's CSP is missing the document-server origin. Re-run `bash apply.sh` so `csp.yaml` includes `weboffice.domain`.
+
+6. **Bulwark inline iframe blocked (`frame-ancestors 'self'`)** — OpenCloud refuses to load inside webmail until `embed.frame_ancestors` includes the Bulwark origin. On a same-VPS engine install, re-run `bash apply.sh` in easydeploy-engine so it writes the embed sidecar from `bulwark.domain`. Standalone: set `embed.frame_ancestors: ["https://webmail.example.com"]` in `deploy.yaml` and re-apply.
 
 Euro Office first boot can take **3–5 minutes** (fonts, caches). `apply.sh` waits for WOPI discovery before restarting OpenCloud.
 

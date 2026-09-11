@@ -6,7 +6,47 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib.sh
 source "${SCRIPT_DIR}/scripts/lib.sh"
 
+EASYDEPLOY_INVOKE_ARGS=("$@")
+clear_parent_python_env
+
 DEPLOY_YAML="${SCRIPT_DIR}/deploy.yaml"
+NO_APPLY=0
+PROXY_MODE=""
+FROM_ENGINE=0
+
+usage() {
+	echo "Usage: bash wizard.sh [--from-engine] [--no-apply] [--proxy-mode standalone|integrate]"
+}
+
+while [[ $# -gt 0 ]]; do
+	case "$1" in
+		--help|-h)
+			usage
+			exit 0
+			;;
+		--from-engine)
+			NO_APPLY=1
+			PROXY_MODE="integrate"
+			FROM_ENGINE=1
+			shift
+			;;
+		--no-apply)
+			NO_APPLY=1
+			shift
+			;;
+		--proxy-mode)
+			PROXY_MODE="${2:-}"
+			shift 2
+			;;
+		--proxy-mode=*)
+			PROXY_MODE="${1#*=}"
+			shift
+			;;
+		*)
+			die "Unknown option: $1"
+			;;
+	esac
+done
 
 print_banner() {
 	echo
@@ -21,22 +61,50 @@ gather_config() {
 	local role_admin role_user role_guest
 	local weboffice_enabled weboffice_domain
 	local modules_search modules_antivirus modules_radicale modules_monitoring
-	local base_domain proceed
+	local base_domain proceed proxy_mode use_local_kanidm oidc_provider
+	local kanidm_domain default_idp
+	local LOCAL_KANIDM_DOMAIN="" LOCAL_KANIDM_DEPLOY=""
 
 	print_banner
 	echo -e "  Press Enter to accept a ${CYAN}[default]${RESET}.\n"
+	print_data_dir_hint
+	cd "${SCRIPT_DIR}"
 
 	ask domain "OpenCloud domain (e.g. cloud.example.com)" "cloud.example.com"
 	base_domain="$(base_domain_from_host "$domain")"
 
-	ask data_root "Data root directory" "/var/lib/opencloud"
+	ask data_root "Data root directory" "$(default_data_dir opencloud)"
 
 	echo
 	echo -e "${BOLD}  Authentication${RESET}"
-	ask auth_mode "Auth mode: builtin or oidc" "builtin"
-	auth_mode="${auth_mode,,}"
-	if [[ "$auth_mode" != "builtin" && "$auth_mode" != "oidc" ]]; then
-		die "auth mode must be 'builtin' or 'oidc'"
+	eval "$(uv run python -m scripts.config_edit --print-local-kanidm)"
+	use_local_kanidm="n"
+	oidc_provider=""
+	kanidm_domain="${LOCAL_KANIDM_DOMAIN:-}"
+	if [[ -n "$kanidm_domain" ]]; then
+		if [[ "${FROM_ENGINE}" == "1" ]]; then
+			use_local_kanidm="y"
+			info "Using Kanidm on this VPS at https://${kanidm_domain}."
+		else
+			ask_yn use_local_kanidm "Use Kanidm at https://${kanidm_domain} as the OpenCloud IdP?" "y"
+		fi
+	fi
+	if [[ "$use_local_kanidm" == "y" ]]; then
+		if [[ -z "$kanidm_domain" ]]; then
+			die "Kanidm was selected but no identity domain was found."
+		fi
+		auth_mode="oidc"
+		oidc_provider="kanidm"
+		oidc_issuer="https://${kanidm_domain}/oauth2/openid/opencloud"
+		oidc_account="https://${kanidm_domain}/"
+		oidc_domain="$kanidm_domain"
+		info "OIDC issuer: ${oidc_issuer} (engine will register the OIDC client)."
+	else
+		ask auth_mode "Auth mode: builtin or oidc" "builtin"
+		auth_mode="${auth_mode,,}"
+		if [[ "$auth_mode" != "builtin" && "$auth_mode" != "oidc" ]]; then
+			die "auth mode must be 'builtin' or 'oidc'"
+		fi
 	fi
 
 	admin_password=""
@@ -44,21 +112,27 @@ gather_config() {
 		ask_secret admin_password "Admin password (leave empty to auto-generate on apply)"
 	fi
 
-	oidc_issuer=""
-	oidc_account=""
-	oidc_domain=""
 	oidc_client_id="opencloud"
 	role_admin="opencloud-admin"
 	role_user="opencloud-user"
 	role_guest="opencloud-guest"
+	if [[ "$use_local_kanidm" != "y" ]]; then
+		oidc_issuer=""
+		oidc_account=""
+		oidc_domain=""
+	fi
 
-	if [[ "$auth_mode" == "oidc" ]]; then
+	if [[ "$auth_mode" == "oidc" && "$use_local_kanidm" != "y" ]]; then
+		default_idp="${kanidm_domain:-idm.${base_domain}}"
 		echo
-		echo -e "${BOLD}  External OIDC (Authentik, Keycloak, …)${RESET}"
-		ask oidc_issuer "OIDC issuer URL" "https://authentik.${base_domain}/application/o/opencloud/"
-		ask oidc_account "Account settings URL" "https://authentik.${base_domain}/if/user/"
-		ask oidc_domain "IdP domain (for CSP)" "authentik.${base_domain}"
+		echo -e "${BOLD}  OIDC issuer (Kanidm, Authentik, Keycloak, …)${RESET}"
+		echo "  Kanidm issuer is per-client, e.g. https://idm.${base_domain}/oauth2/openid/opencloud"
+		ask oidc_issuer "OIDC issuer URL" "https://${default_idp}/oauth2/openid/opencloud"
+		ask oidc_account "Account settings URL" "https://${default_idp}/"
+		ask oidc_domain "IdP domain (for CSP)" "${default_idp}"
 		ask oidc_client_id "OIDC client ID" "opencloud"
+		ask oidc_provider "Provider: kanidm, authentik, keycloak, or other" "kanidm"
+		oidc_provider="${oidc_provider,,}"
 		ask role_admin "Admin group name" "opencloud-admin"
 		ask role_user "User group name" "opencloud-user"
 		ask role_guest "Guest group name" "opencloud-guest"
@@ -80,18 +154,36 @@ gather_config() {
 	ask_yn modules_monitoring "Enable monitoring endpoints?" "n"
 
 	echo
+	echo -e "${BOLD}  Reverse proxy${RESET}"
+	if [[ -n "${PROXY_MODE}" ]]; then
+		proxy_mode="${PROXY_MODE,,}"
+		info "Proxy mode: ${proxy_mode} (set by easydeploy-engine)"
+	else
+		ask proxy_mode "Proxy mode: standalone or integrate" "$([[ "$use_local_kanidm" == "y" ]] && echo integrate || echo standalone)"
+		proxy_mode="${proxy_mode,,}"
+	fi
+	if [[ "$proxy_mode" != "standalone" && "$proxy_mode" != "integrate" ]]; then
+		die "proxy mode must be 'standalone' or 'integrate'"
+	fi
+
+	echo
 	echo -e "${BOLD}  Summary${RESET}"
 	echo "  OpenCloud:     https://${domain}"
 	if [[ "$weboffice_enabled" == "y" ]]; then
 		echo "  Euro Office:   https://${weboffice_domain}"
 	fi
-	echo "  Auth:          ${auth_mode}"
+	echo "  Auth:          ${auth_mode}${oidc_provider:+ (${oidc_provider})}"
 	echo "  Data root:     ${data_root}"
+	echo "  Proxy mode:    ${proxy_mode}"
 	echo
 	echo "  Ensure DNS A/AAAA records point to this server before continuing."
 	echo
 
-	ask_yn proceed "Write deploy.yaml and deploy now?" "y"
+	if [[ "${NO_APPLY}" == "1" ]]; then
+		ask_yn proceed "Write deploy.yaml?" "y"
+	else
+		ask_yn proceed "Write deploy.yaml and deploy now?" "y"
+	fi
 	[[ "$proceed" == "y" ]] || {
 		info "Cancelled."
 		exit 0
@@ -111,6 +203,7 @@ update_from_wizard(
     oidc_account_url=${oidc_account@Q} or None,
     oidc_domain=${oidc_domain@Q} or None,
     oidc_client_id=${oidc_client_id@Q} or None,
+    oidc_provider=${oidc_provider@Q} or None,
     role_admin=${role_admin@Q},
     role_user=${role_user@Q},
     role_guest=${role_guest@Q},
@@ -120,6 +213,7 @@ update_from_wizard(
     modules_antivirus=${modules_antivirus@Q} == "y",
     modules_radicale=${modules_radicale@Q} == "y",
     modules_monitoring=${modules_monitoring@Q} == "y",
+    proxy_mode=${proxy_mode@Q},
     path=Path(${DEPLOY_YAML@Q}),
 )
 PY
@@ -128,13 +222,14 @@ PY
 }
 
 main() {
-	if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
-		echo "Usage: bash wizard.sh"
-		exit 0
-	fi
-
 	bash "${SCRIPT_DIR}/ensure-dependencies.sh"
+	ensure_docker_group_session "${EASYDEPLOY_INVOKE_ARGS[@]}"
+	cd "${SCRIPT_DIR}"
 	gather_config
+	if [[ "${NO_APPLY}" == "1" ]]; then
+		info "Skipping apply (--no-apply / --from-engine). easydeploy-engine will apply."
+		return 0
+	fi
 	bash "${SCRIPT_DIR}/apply.sh"
 }
 

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import os
 import textwrap
 from pathlib import Path
 
@@ -9,12 +11,25 @@ import pytest
 import yaml
 
 from scripts.apply import (
+    _network_address,
+    apply_engine_embed_sidecar,
+    apply_engine_oidc_sidecar,
+    bootstrap_ldap_tls,
+    build_caddy_site_blocks,
     build_env_vars,
+    build_proxy_role_block,
     derive_compose_files,
+    discover_ldap_server_ip,
+    extra_frame_ancestors,
+    ldap_data_dir,
+    office_frame_ancestors_csp,
+    opencloud_admin_user_id,
     render_caddyfile,
+    render_csp_yaml,
     render_network_overlay,
     render_template,
     validate_config,
+    web_office_csp_domain,
 )
 
 
@@ -23,13 +38,13 @@ def _base_config(**overrides) -> dict:
         "opencloud": {
             "domain": "cloud.test.example",
             "image": "opencloudeu/opencloud-rolling",
-            "tag": "7.2.0",
+            "tag": "7.5.0",
             "data_dir": "/var/lib/opencloud/data",
             "config_dir": "/var/lib/opencloud/config",
             "apps_dir": "/var/lib/opencloud/apps",
             "language": "en",
         },
-        "proxy": {"type": "caddy"},
+        "proxy": {"type": "caddy", "mode": "standalone", "integrate": {"network": "easydeploy-net"}},
         "auth": {"mode": "builtin"},
         "weboffice": {
             "enabled": True,
@@ -49,6 +64,44 @@ def _base_config(**overrides) -> dict:
         else:
             config[key] = value
     return config
+
+
+def test_derive_compose_files_integrate_excludes_caddy():
+    config = _base_config(proxy={"type": "caddy", "mode": "integrate"})
+    files = derive_compose_files(config)
+    assert "../overlays/proxy/caddy.yml" not in files
+    assert "docker-compose.yml" in files
+
+
+def test_derive_compose_files_oidc_kanidm_provider():
+    config = _base_config(
+        auth={
+            "mode": "oidc",
+            "oidc": {
+                "provider": "kanidm",
+                "issuer_url": "https://idm.example/oauth2/openid/opencloud",
+                "account_url": "https://idm.example/",
+                "domain": "idm.example",
+                "client_id": "opencloud",
+            },
+        },
+    )
+    files = derive_compose_files(config)
+    assert "idm/external-idp.yml" in files
+    assert "../overlays/idm/kanidm-provider.yml" in files
+    assert "../overlays/idm/authelia-provider.yml" not in files
+    assert "idm/external-authelia.yml" not in files
+
+
+def test_render_integration_fragment(tmp_path, monkeypatch):
+    from scripts.apply import INTEGRATION_CADDY_FRAGMENT, render_integration_fragment
+
+    monkeypatch.setattr("scripts.apply.INTEGRATION_DIR", tmp_path)
+    monkeypatch.setattr("scripts.apply.INTEGRATION_CADDY_FRAGMENT", tmp_path / "caddy.caddy")
+    render_integration_fragment(_base_config())
+    text = (tmp_path / "caddy.caddy").read_text()
+    assert "cloud.test.example" in text
+    assert "eurooffice.test.example" in text
 
 
 def test_derive_compose_files_builtin_euro_office():
@@ -115,6 +168,10 @@ def test_build_env_vars_production_defaults():
     assert env["EURO_OFFICE_DOMAIN"] == "eurooffice.test.example"
     assert env["EURO_OFFICE_JWT_SECRET"] == "jwt-secret"
     assert env["EURO_OFFICE_DATA_DIR"] == "/var/lib/opencloud/euro-office"
+    expected_uid_gid = (
+        "1000:1000" if os.geteuid() == 0 else f"{os.getuid()}:{os.getgid()}"
+    )
+    assert env["OC_CONTAINER_UID_GID"] == expected_uid_gid
     assert env["OCD_CADDYFILE"].endswith("/caddy/Caddyfile")
     assert "idm/external-idp.yml" not in env["COMPOSE_FILE"]
 
@@ -140,8 +197,88 @@ def test_build_env_vars_oidc():
     }
     env = build_env_vars(config, secrets)
     assert env["PROXY_ROLE_ASSIGNMENT_DRIVER"] == "oidc"
+    assert env["GRAPH_ASSIGN_DEFAULT_USER_ROLE"] == "false"
     assert env["IDP_ISSUER_URL"] == "https://idp.example/o/opencloud/"
     assert "idm/external-idp.yml" in env["COMPOSE_FILE"]
+
+
+def test_build_env_vars_kanidm_uses_groups_name_scopes():
+    config = _base_config(
+        auth={
+            "mode": "oidc",
+            "oidc": {
+                "provider": "kanidm",
+                "issuer_url": "https://idm.example/oauth2/openid/opencloud",
+                "account_url": "https://idm.example/",
+                "domain": "idm.example",
+                "client_id": "opencloud",
+                "role_claim": "opencloudRoles",
+                "role_mapping": {"admin": "admin", "user": "user", "guest": "guest"},
+            },
+        }
+    )
+    env = build_env_vars(
+        config,
+        {
+            "INITIAL_ADMIN_PASSWORD": "x",
+            "EURO_OFFICE_JWT_SECRET": "y",
+            "LDAP_BIND_PASSWORD": "z",
+        },
+    )
+    assert env["OC_OIDC_CLIENT_SCOPES"] == "openid profile email groups groups_name"
+    assert "PROXY_ROLE_ASSIGNMENT_OIDC_CLAIM" not in env
+    assert env["PROXY_ROLE_ASSIGNMENT_DRIVER"] == "default"
+    assert env["GRAPH_ASSIGN_DEFAULT_USER_ROLE"] == "true"
+    assert env["OC_LDAP_DISABLE_USER_MECHANISM"] == "none"
+    assert "../overlays/idm/kanidm-provider.yml" in env["COMPOSE_FILE"]
+    assert "../overlays/idm/authelia-provider.yml" not in env["COMPOSE_FILE"]
+
+
+def test_build_proxy_role_block_kanidm_uses_default_driver():
+    config = _base_config(
+        auth={
+            "mode": "oidc",
+            "oidc": {
+                "provider": "kanidm",
+                "role_claim": "opencloudRoles",
+                "role_mapping": {"admin": "admin"},
+            },
+        }
+    )
+    block = build_proxy_role_block(config)
+    assert "driver: default" in block
+    assert "oidc_role_mapper" not in block
+
+
+def test_opencloud_admin_user_id_from_sibling_kanidm(tmp_path, monkeypatch):
+    from scripts import apply as apply_module
+
+    sibling = tmp_path / "kanidm-easy-deploy"
+    sibling.mkdir()
+    (sibling / "deploy.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "users": [
+                    {"username": "thomas", "groups": ["opencloud-admin", "mail-users"]},
+                ]
+            }
+        )
+    )
+    monkeypatch.setattr(apply_module, "PROJECT_ROOT", tmp_path / "opencloud-easy-deploy")
+    config = _base_config(auth={"mode": "oidc", "oidc": {"provider": "kanidm"}})
+    assert opencloud_admin_user_id(config) == "thomas"
+
+
+def test_opencloud_admin_user_id_explicit_wins():
+    config = _base_config(
+        auth={"mode": "oidc", "oidc": {"provider": "kanidm", "admin_user": "operator"}}
+    )
+    assert opencloud_admin_user_id(config) == "operator"
+
+
+def test_ldap_data_dir_is_sibling_of_config():
+    config = _base_config()
+    assert ldap_data_dir(config) == Path("/var/lib/opencloud/ldap_data")
 
 
 def test_render_proxy_role_template():
@@ -183,8 +320,109 @@ def test_render_network_overlay_sets_container_names(tmp_path, monkeypatch):
 
     assert data["services"]["opencloud"]["container_name"] == "opencloud"
     assert data["services"]["euro-office"]["container_name"] == "euro-office"
+    assert "ldap-server" not in data["services"]
+    assert data["networks"]["opencloud-net"]["external"] is True
     assert "eurooffice.test.example:host-gateway" in data["services"]["opencloud"]["extra_hosts"]
     assert "cloud.test.example:host-gateway" in data["services"]["euro-office"]["extra_hosts"]
+
+
+def test_render_network_overlay_adds_idp_host_gateway(tmp_path, monkeypatch):
+    from scripts import apply as apply_module
+
+    overlay_path = tmp_path / "network-fixups.yml"
+    monkeypatch.setattr(apply_module, "NETWORK_OVERLAY_PATH", overlay_path)
+    render_network_overlay(
+        _base_config(
+            auth={
+                "mode": "oidc",
+                "oidc": {"domain": "auth.test.example"},
+            }
+        )
+    )
+    data = yaml.safe_load(overlay_path.read_text())
+    assert "auth.test.example:host-gateway" in data["services"]["opencloud"]["extra_hosts"]
+
+
+def test_render_network_overlay_dual_homes_ldap_server(tmp_path, monkeypatch):
+    from scripts import apply as apply_module
+
+    overlay_path = tmp_path / "network-fixups.yml"
+    monkeypatch.setattr(apply_module, "NETWORK_OVERLAY_PATH", overlay_path)
+    render_network_overlay(
+        _base_config(
+            proxy={"type": "caddy", "mode": "integrate"},
+            auth={
+                "mode": "oidc",
+                "oidc": {"domain": "auth.test.example"},
+            },
+        )
+    )
+    data = yaml.safe_load(overlay_path.read_text())
+    ldap = data["services"]["ldap-server"]
+    assert ldap["container_name"] == "ldap-server"
+    assert ldap["networks"] == ["opencloud-net"]
+    assert data["services"]["opencloud"]["depends_on"] == ["ldap-server"]
+    assert data["services"]["opencloud"]["links"] == ["ldap-server"]
+    assert data["services"]["opencloud"]["networks"] == ["opencloud-net", "easydeploy-net"]
+
+
+def test_render_network_overlay_pins_ldap_ip(tmp_path, monkeypatch):
+    from scripts import apply as apply_module
+
+    overlay_path = tmp_path / "network-fixups.yml"
+    monkeypatch.setattr(apply_module, "NETWORK_OVERLAY_PATH", overlay_path)
+    render_network_overlay(
+        _base_config(
+            auth={"mode": "oidc", "oidc": {"domain": "auth.test.example"}},
+        ),
+        ldap_ip="172.20.0.7",
+    )
+    data = yaml.safe_load(overlay_path.read_text())
+    assert "ldap-server:172.20.0.7" in data["services"]["opencloud"]["extra_hosts"]
+
+
+def test_network_address_skips_invalid_placeholder():
+    assert _network_address({"IPAddress": "invalid IP"}) == ""
+    assert _network_address({"IPAddress": "172.20.0.7"}) == "172.20.0.7"
+    assert _network_address({"IPAddress": "", "GlobalIPv6Address": "fd00::7"}) == "fd00::7"
+
+
+def test_discover_ldap_server_ip_reads_bridge_membership(monkeypatch):
+    payload = [
+        {
+            "Containers": {
+                "abc": {"Name": "ldap-server", "IPv4Address": "172.21.0.9/16"},
+            }
+        }
+    ]
+
+    def fake_run(cmd, **_kwargs):
+        assert cmd[:3] == ["docker", "network", "inspect"]
+        return type("R", (), {"returncode": 0, "stdout": json.dumps(payload), "stderr": ""})()
+
+    monkeypatch.setattr("scripts.apply.subprocess.run", fake_run)
+    assert discover_ldap_server_ip() == "172.21.0.9"
+
+
+def test_discover_ldap_server_ip_falls_back_to_container_inspect(monkeypatch):
+    inspect = [
+        {
+            "NetworkSettings": {
+                "Networks": {
+                    "easydeploy-net": {"IPAddress": "172.21.0.4"},
+                    "opencloud-net": {"IPAddress": "172.18.0.8"},
+                }
+            }
+        }
+    ]
+
+    def fake_run(cmd, **_kwargs):
+        if cmd[:3] == ["docker", "network", "inspect"]:
+            return type("R", (), {"returncode": 1, "stdout": "", "stderr": ""})()
+        return type("R", (), {"returncode": 0, "stdout": json.dumps(inspect), "stderr": ""})()
+
+    monkeypatch.setattr("scripts.apply.subprocess.run", fake_run)
+    assert discover_ldap_server_ip() == "172.18.0.8"
 
 
 def test_render_caddyfile_allows_opencloud_iframe(tmp_path, monkeypatch):
@@ -202,5 +440,163 @@ def test_render_caddyfile_allows_opencloud_iframe(tmp_path, monkeypatch):
     render_caddyfile(_base_config())
     rendered = caddyfile.read_text()
     assert "frame-ancestors 'self' https://cloud.test.example" in rendered
-    assert "header_down -X-Frame-Options" in rendered
-    assert rendered.count("X-Frame-Options SAMEORIGIN") == 1
+
+
+def test_web_office_csp_domain_uses_weboffice_when_enabled():
+    assert web_office_csp_domain(_base_config()) == "eurooffice.test.example"
+
+
+def test_web_office_csp_domain_falls_back_when_disabled():
+    config = _base_config(weboffice={"enabled": False, "type": "euro_office", "domain": "eurooffice.test.example"})
+    assert web_office_csp_domain(config) == "cloud.test.example"
+
+
+def test_render_csp_yaml_allows_euro_office_frame_src(tmp_path):
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    config = _base_config(
+        opencloud={"config_dir": str(config_dir)},
+        auth={
+            "mode": "oidc",
+            "oidc": {
+                "issuer_url": "https://auth.test.example/oauth2/openid/opencloud",
+                "account_url": "https://auth.test.example/",
+                "domain": "auth.test.example",
+                "client_id": "opencloud",
+            },
+        },
+    )
+    render_csp_yaml(config)
+    rendered = (config_dir / "csp.yaml").read_text()
+    assert "https://eurooffice.test.example" in rendered
+    assert "https://auth.test.example" in rendered
+    frame_src = rendered.split("frame-src:")[1].split("img-src:")[0]
+    assert "https://eurooffice.test.example" in frame_src
+    img_src = rendered.split("img-src:")[1].split("manifest-src:")[0]
+    assert "https://eurooffice.test.example" in img_src
+
+
+def test_render_csp_yaml_allows_webmail_frame_ancestors(tmp_path):
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    config = _base_config(
+        opencloud={"config_dir": str(config_dir)},
+        embed={"frame_ancestors": ["webmail.test.example"]},
+    )
+    render_csp_yaml(config)
+    rendered = (config_dir / "csp.yaml").read_text()
+    ancestors = rendered.split("frame-ancestors:")[1].split("frame-src:")[0]
+    assert "https://webmail.test.example" in ancestors
+    assert "'''self'''" in ancestors
+
+
+def test_caddy_drops_x_frame_options_when_embed_parents_set():
+    oc_block, _euro = build_caddy_site_blocks(
+        _base_config(embed={"frame_ancestors": ["https://webmail.test.example"]})
+    )
+    assert "X-Frame-Options SAMEORIGIN" not in oc_block
+    assert "header_down -X-Frame-Options" in oc_block
+    assert "-X-Frame-Options" in oc_block
+
+
+def test_caddy_keeps_sameorigin_without_embed_parents():
+    oc_block, euro_block = build_caddy_site_blocks(_base_config())
+    assert "X-Frame-Options SAMEORIGIN" in oc_block
+    assert "frame-ancestors 'self' https://cloud.test.example" in euro_block
+    assert "webmail.test.example" not in euro_block
+
+
+def test_office_caddy_allows_webmail_nested_iframe():
+    _oc, euro_block = build_caddy_site_blocks(
+        _base_config(embed={"frame_ancestors": ["https://webmail.test.example"]})
+    )
+    assert (
+        "frame-ancestors 'self' https://cloud.test.example https://webmail.test.example"
+        in euro_block
+    )
+    assert "header_down -Content-Security-Policy" in euro_block
+
+
+def test_office_frame_ancestors_csp_dedupes_opencloud_origin():
+    config = _base_config(embed={"frame_ancestors": ["cloud.test.example", "webmail.test.example"]})
+    assert office_frame_ancestors_csp(config) == (
+        "'self' https://cloud.test.example https://webmail.test.example"
+    )
+
+
+def test_apply_engine_embed_sidecar_merges_origins(tmp_path):
+    sidecar = tmp_path / "embed.yaml"
+    sidecar.write_text("frame_ancestors:\n  - https://webmail.test.example\n")
+    config = {"opencloud": {"domain": "cloud.test.example"}, "embed": {"frame_ancestors": ["portal.test.example"]}}
+    apply_engine_embed_sidecar(config, sidecar)
+    assert extra_frame_ancestors(config) == [
+        "https://portal.test.example",
+        "https://webmail.test.example",
+    ]
+
+
+def test_apply_engine_embed_sidecar_respects_managed_false(tmp_path):
+    sidecar = tmp_path / "embed.yaml"
+    sidecar.write_text("frame_ancestors:\n  - https://webmail.test.example\n")
+    config = {"opencloud": {"domain": "cloud.test.example"}, "embed": {"managed": False}}
+    apply_engine_embed_sidecar(config, sidecar)
+    assert extra_frame_ancestors(config) == []
+
+
+def test_bootstrap_ldap_tls_creates_cert_files(tmp_path):
+    certs_dir = tmp_path / "ldap_certs"
+    bootstrap_ldap_tls(certs_dir)
+    assert (certs_dir / "openldap.key").is_file()
+    assert (certs_dir / "openldap.crt").is_file()
+    bootstrap_ldap_tls(certs_dir)
+
+
+def test_apply_engine_oidc_sidecar_fills_blank_fields(tmp_path):
+    sidecar = tmp_path / "oidc-provider.yaml"
+    sidecar.write_text(
+        "provider: kanidm\nissuer_url: https://idm.test.example/oauth2/openid/opencloud\n"
+        "account_url: https://idm.test.example/\ndomain: idm.test.example\n"
+        "client_id: opencloud\n"
+    )
+    config = {"auth": {"mode": "builtin", "oidc": {}}}
+    apply_engine_oidc_sidecar(config, sidecar)
+    assert config["auth"]["mode"] == "oidc"
+    assert config["auth"]["oidc"]["issuer_url"] == "https://idm.test.example/oauth2/openid/opencloud"
+    assert config["auth"]["oidc"]["provider"] == "kanidm"
+
+
+def test_apply_engine_oidc_sidecar_replaces_stale_managed_values(tmp_path):
+    sidecar = tmp_path / "oidc-provider.yaml"
+    sidecar.write_text(
+        "provider: kanidm\n"
+        "issuer_url: https://auth.test.example/oauth2/openid/opencloud\n"
+        "account_url: https://auth.test.example/\n"
+        "domain: auth.test.example\n"
+        "client_id: opencloud\n"
+    )
+    config = {
+        "auth": {
+            "mode": "builtin",
+            "oidc": {
+                "provider": "kanidm",
+                "issuer_url": "https://idm.example.com/oauth2/openid/opencloud",
+                "domain": "idm.example.com",
+                "client_id": "old-client",
+            },
+        }
+    }
+    apply_engine_oidc_sidecar(config, sidecar)
+    assert config["auth"]["mode"] == "oidc"
+    assert config["auth"]["oidc"]["issuer_url"] == (
+        "https://auth.test.example/oauth2/openid/opencloud"
+    )
+    assert config["auth"]["oidc"]["domain"] == "auth.test.example"
+    assert config["auth"]["oidc"]["client_id"] == "opencloud"
+
+
+def test_apply_engine_oidc_sidecar_respects_external_provider(tmp_path):
+    sidecar = tmp_path / "oidc-provider.yaml"
+    sidecar.write_text("provider: kanidm\nissuer_url: https://idm.test.example/oauth2/openid/opencloud\n")
+    config = {"auth": {"mode": "oidc", "oidc": {"provider": "keycloak", "issuer_url": "https://idp.example"}}}
+    apply_engine_oidc_sidecar(config, sidecar)
+    assert config["auth"]["oidc"]["issuer_url"] == "https://idp.example"
