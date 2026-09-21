@@ -1256,6 +1256,9 @@ def apply(
         print("Skipping runtime reconcile (--no-reconcile-runtime).")
     else:
         reconcile_runtime(env_path, config)
+        from scripts.update import record_current_lock
+
+        record_current_lock()
 
     if not edlog.is_quiet():
         print_summary(config)

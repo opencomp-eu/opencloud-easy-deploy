@@ -41,7 +41,7 @@ bash apply.sh
 | `bash apply.sh` | Converge config and start/restart services |
 | `bash wizard.sh` | Interactive `deploy.yaml` creator + apply |
 | `bash start.sh` / `stop.sh` | Lifecycle without re-rendering |
-| `bash update.sh` | Pull submodule + images, re-apply, restart |
+| `bash update.sh` | Pull git + images; skip restarts when `update.lock` matches |
 | `bash backup-bundle.sh` | Portable `.tar.gz` for VPS migration |
 | `bash restore-bundle.sh` | Restore from portable bundle on a fresh VPS |
 | `bash restore-borg.sh` | Restore from Borg (local or SFTP) on a fresh VPS |
