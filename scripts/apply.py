@@ -27,6 +27,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT / "easydeploy-lib" / "python"))
 import backup_config  # noqa: E402
 import hostfs  # noqa: E402
+import edlog  # noqa: E402
 
 COMPOSE_DIR = PROJECT_ROOT / "opencloud-compose"
 STATE_DIR = PROJECT_ROOT / ".opencloud-easy-deploy"
@@ -1256,8 +1257,9 @@ def apply(
     else:
         reconcile_runtime(env_path, config)
 
-    print_summary(config)
-    print_backup_summary(config)
+    if not edlog.is_quiet():
+        print_summary(config)
+        print_backup_summary(config)
     reconcile_backup_schedule()
 
 
