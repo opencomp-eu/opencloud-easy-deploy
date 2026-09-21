@@ -15,6 +15,14 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 LIB_BACKUP_PLAN = PROJECT_ROOT / "easydeploy-lib" / "python" / "backup_plan.py"
 
 
+def test_backup_sh_defers_local_repo_creation_to_shared_lib():
+    text = (PROJECT_ROOT / "backup.sh").read_text()
+
+    assert "ensure_local_repo_dir" not in text
+    assert 'mkdir -p "${BACKUP_REPO_PATH}"' not in text
+    assert "easydeploy_backup_repo_create" in text
+
+
 def test_plan_tracks_operator_paths_and_timer(tmp_path: Path):
     (tmp_path / "deploy.yaml").write_text(
         yaml.safe_dump(

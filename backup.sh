@@ -114,7 +114,6 @@ run_backup() {
 		return 0
 	fi
 
-	ensure_local_repo_dir
 	local borgmatic_config="${BACKUP_STATE_DIR}/borgmatic.yaml"
 	mkdir -p "${BACKUP_STATE_DIR}"
 	easydeploy_backup_write_borgmatic_config "${borgmatic_config}" "${BACKUP_REPO_URL}" \
@@ -134,12 +133,6 @@ run_backup() {
 		STACK_STOPPED="false"
 	fi
 	success "Backup complete."
-}
-
-ensure_local_repo_dir() {
-	[[ "${BACKUP_REPO_TYPE:-}" == "local" ]] || return 0
-	mkdir -p "${BACKUP_REPO_PATH}"
-	chmod 700 "${BACKUP_REPO_PATH}" 2>/dev/null || true
 }
 
 stage_payload() {
