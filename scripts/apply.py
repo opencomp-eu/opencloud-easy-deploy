@@ -941,10 +941,13 @@ def fix_data_permissions(config: dict) -> None:
         Path(str(opencloud["data_dir"])),
         Path(str(opencloud["apps_dir"])),
     ]
+    # Restored backups can leave files root-owned below these directories, and
+    # OpenCloud refuses to start when it cannot read its own opencloud.yaml.
     for path in paths:
         if path.exists():
             try:
                 hostfs.chown_path(path, uid, gid)
+                hostfs.chown_tree(path, uid, gid)
             except PermissionError:
                 pass
     if auth_mode == "oidc":
