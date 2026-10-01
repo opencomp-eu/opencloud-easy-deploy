@@ -204,7 +204,8 @@ main() {
 		fi
 		# Old OpenCloud archives contain backup-root/, while shared archives
 		# contain payload/. Delegate the former to the tested legacy adapter.
-		if borg list --short "${BACKUP_REPO_URL}::${archive_name}" backup-root >/dev/null 2>&1; then
+		# borg list exits 0 when the path is absent, so test for output instead.
+		if [[ -n "$(borg list --short "${BACKUP_REPO_URL}::${archive_name}" backup-root 2>/dev/null)" ]]; then
 			restore_legacy_borg "${archive_name}"
 		else
 			mkdir -p "${RESTORE_DIR}"
