@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import secrets
@@ -34,6 +35,7 @@ STATE_DIR = PROJECT_ROOT / ".opencloud-easy-deploy"
 SECRETS_PATH = STATE_DIR / "secrets.yaml"
 DEPLOY_PATH = PROJECT_ROOT / "deploy.yaml"
 NETWORK_OVERLAY_PATH = STATE_DIR / "compose" / "network-fixups.yml"
+RUNTIME_FINGERPRINT_PATH = STATE_DIR / "runtime-config.sha256"
 INTEGRATION_DIR = STATE_DIR / "integration"
 INTEGRATION_CADDY_FRAGMENT = INTEGRATION_DIR / "caddy.caddy"
 EMBED_SIDECAR = INTEGRATION_DIR / "embed.yaml"
@@ -61,6 +63,7 @@ SECRET_KEYS = (
     "INITIAL_ADMIN_PASSWORD",
     "EURO_OFFICE_JWT_SECRET",
     "LDAP_BIND_PASSWORD",
+    "COLLABORA_ADMIN_PASSWORD",
 )
 
 PRESERVED_SECRET_KEYS = frozenset(SECRET_KEYS)
@@ -542,6 +545,13 @@ def build_additional_services(config: dict) -> str:
     return ",".join(services)
 
 
+# Upstream opencloud-compose defaults these to :latest.
+EURO_OFFICE_DOCKER_TAG = "v9.3.4-hotfix.1@sha256:889e681923d2dcc8bdfb92fe128d10e185fcff880d302b6a0c0c7bf339499290"
+TIKA_IMAGE = "apache/tika:4.1.0@sha256:06bcdbd09aca073293e5a171ad161418cc93c91d58d9e4e205064eade84889d4"
+CLAMAV_DOCKER_TAG = "1.5.4@sha256:ebec5bc138401b36ae987caa1a3fa3c3b2a21ed3d51f0bfa5852825e663e67b0"
+RADICALE_DOCKER_TAG = "v3.8.1@sha256:28c2c44cbf241755a5cfb80eea0521ef280993da20537e2d6980dae1254e552d"
+
+
 def build_env_vars(config: dict, secrets: dict[str, str]) -> dict[str, str]:
     opencloud = config["opencloud"]
     weboffice = config.get("weboffice") or {}
@@ -569,6 +579,9 @@ def build_env_vars(config: dict, secrets: dict[str, str]) -> dict[str, str]:
         "OC_CONTAINER_UID_GID": "{0}:{1}".format(*hostfs.service_uid_gid(root_default=(1000, 1000))),
         "DEFAULT_LANGUAGE": str(opencloud.get("language") or "en"),
         "START_ADDITIONAL_SERVICES": build_additional_services(config),
+        "TIKA_IMAGE": TIKA_IMAGE,
+        "CLAMAV_DOCKER_TAG": CLAMAV_DOCKER_TAG,
+        "RADICALE_DOCKER_TAG": RADICALE_DOCKER_TAG,
     }
     if proxy_mode(config) == "standalone":
         env["OCD_CADDYFILE"] = str(CADDYFILE.resolve())
@@ -585,10 +598,11 @@ def build_env_vars(config: dict, secrets: dict[str, str]) -> dict[str, str]:
             env["EURO_OFFICE_DOMAIN"] = str(weboffice["domain"])
             env["EURO_OFFICE_JWT_SECRET"] = secrets["EURO_OFFICE_JWT_SECRET"]
             env["EURO_OFFICE_DOCKER_IMAGE"] = ""
-            env["EURO_OFFICE_DOCKER_TAG"] = "latest"
+            env["EURO_OFFICE_DOCKER_TAG"] = EURO_OFFICE_DOCKER_TAG
             env["EURO_OFFICE_DATA_DIR"] = str(data_root / "euro-office")
         elif office_type == "collabora":
             env["COLLABORA_DOMAIN"] = str(weboffice["domain"])
+            env["COLLABORA_ADMIN_PASSWORD"] = secrets["COLLABORA_ADMIN_PASSWORD"]
             env["COLLABORA_SSL_ENABLE"] = "false"
             env["COLLABORA_SSL_VERIFICATION"] = "true"
 
@@ -1114,7 +1128,46 @@ def pin_ldap_server_after_up(config: dict, env: dict[str, str]) -> None:
     print(f"  OpenCloud LDAP URI is {uri}")
 
 
-def reconcile_runtime(env_path: Path, config: dict) -> None:
+def mounted_config_files(config: dict) -> list[Path]:
+    """Rendered files containers read through bind mounts; compose cannot see edits to them."""
+    config_dir = Path(str(config["opencloud"]["config_dir"]))
+    ldap_certs = config_dir.parent / "ldap_certs"
+    files = [
+        config_dir / "proxy.yaml",
+        config_dir / "csp.yaml",
+        config_dir / "app-registry.yaml",
+        ldap_certs / "openldap.key",
+        ldap_certs / "openldap.crt",
+        CADDYFILE,
+    ]
+    upstream = COMPOSE_DIR / "config"
+    if upstream.is_dir():
+        files.extend(sorted(path for path in upstream.rglob("*") if path.is_file()))
+    return files
+
+
+def runtime_config_fingerprint(config: dict) -> str:
+    digest = hashlib.sha256()
+    for path in mounted_config_files(config):
+        digest.update(f"{path}\0".encode())
+        try:
+            digest.update(path.read_bytes())
+        except OSError:
+            digest.update(b"<unreadable>")
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def container_started_at(name: str) -> str:
+    result = subprocess.run(
+        ["docker", "inspect", "-f", "{{.State.StartedAt}}", name],
+        capture_output=True,
+        text=True,
+    )
+    return result.stdout.strip() if result.returncode == 0 else ""
+
+
+def reconcile_runtime(env_path: Path, config: dict, *, force_recreate: bool = False) -> None:
     env = {}
     if env_path.is_file():
         for line in env_path.read_text().splitlines():
@@ -1132,18 +1185,42 @@ def reconcile_runtime(env_path: Path, config: dict) -> None:
     print("Pulling OpenCloud stack images…")
     run_compose(COMPOSE_DIR, "pull", env=env)
 
+    fingerprint = runtime_config_fingerprint(config)
+    previous = (
+        RUNTIME_FINGERPRINT_PATH.read_text().strip()
+        if RUNTIME_FINGERPRINT_PATH.is_file()
+        else ""
+    )
+    recreate = force_recreate or fingerprint != previous
+    tracked = ("opencloud", "euro-office")
+    started_before = {name: container_started_at(name) for name in tracked}
+
     if proxy_mode(config) == "integrate":
         print("Starting OpenCloud stack (no local Caddy — use easydeploy-engine)…")
     else:
         print("Starting OpenCloud stack (includes Caddy)…")
-    run_compose(COMPOSE_DIR, "up", "-d", "--wait", "--force-recreate", env=env)
+    up_args = ["up", "-d", "--wait"]
+    if recreate:
+        print("  Mounted configuration changed; recreating containers.")
+        up_args.append("--force-recreate")
+    # Without --force-recreate, compose still recreates services whose image, env, or
+    # compose definition changed, and leaves the rest running.
+    run_compose(COMPOSE_DIR, *up_args, env=env)
     if str((config.get("auth") or {}).get("mode") or "").lower() == "oidc":
         pin_ldap_server_after_up(config, env)
 
     weboffice = config.get("weboffice") or {}
     if to_bool(weboffice.get("enabled")) and str(weboffice.get("type") or "") == "euro_office":
-        if wait_for_euro_office():
+        restarted = recreate or any(
+            container_started_at(name) != started_before[name] for name in tracked
+        )
+        # OpenCloud reads WOPI discovery at startup, so it only needs a restart when
+        # it or Euro Office came up during this apply.
+        if restarted and wait_for_euro_office():
             restart_opencloud_if_present()
+
+    RUNTIME_FINGERPRINT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    RUNTIME_FINGERPRINT_PATH.write_text(fingerprint + "\n")
 
 
 def print_summary(config: dict) -> None:
@@ -1255,7 +1332,11 @@ def apply(
     if no_reconcile_runtime:
         print("Skipping runtime reconcile (--no-reconcile-runtime).")
     else:
-        reconcile_runtime(env_path, config)
+        reconcile_runtime(
+            env_path,
+            config,
+            force_recreate=rotate_secrets or wipe_local_accounts,
+        )
         from scripts.update import record_current_lock
 
         record_current_lock()

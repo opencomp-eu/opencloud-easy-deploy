@@ -600,3 +600,87 @@ def test_apply_engine_oidc_sidecar_respects_external_provider(tmp_path):
     config = {"auth": {"mode": "oidc", "oidc": {"provider": "keycloak", "issuer_url": "https://idp.example"}}}
     apply_engine_oidc_sidecar(config, sidecar)
     assert config["auth"]["oidc"]["issuer_url"] == "https://idp.example"
+
+
+def _stub_runtime(monkeypatch, tmp_path, started_at: dict[str, list[str]]):
+    from scripts import apply as apply_module
+
+    compose_dir = tmp_path / "compose"
+    (compose_dir / "config").mkdir(parents=True)
+    monkeypatch.setattr(apply_module, "COMPOSE_DIR", compose_dir)
+    monkeypatch.setattr(apply_module, "CADDYFILE", tmp_path / "Caddyfile")
+    monkeypatch.setattr(apply_module, "RUNTIME_FINGERPRINT_PATH", tmp_path / "state" / "fp")
+    monkeypatch.setattr(apply_module, "ensure_docker_network", lambda name: None)
+    monkeypatch.setattr(apply_module, "stop_opencloud_caddy", lambda: None)
+    monkeypatch.setattr(apply_module, "stop_legacy_caddy", lambda: None)
+    monkeypatch.setattr(apply_module, "wait_for_euro_office", lambda: True)
+    events: list[tuple[str, ...]] = []
+    monkeypatch.setattr(
+        apply_module, "run_compose", lambda directory, *args, env=None: events.append(args)
+    )
+    monkeypatch.setattr(
+        apply_module, "restart_opencloud_if_present", lambda: events.append(("restart-opencloud",))
+    )
+    monkeypatch.setattr(
+        apply_module,
+        "container_started_at",
+        lambda name: started_at[name].pop(0) if started_at[name] else "t-stable",
+    )
+    config_dir = tmp_path / "oc-config"
+    config_dir.mkdir()
+    (config_dir / "proxy.yaml").write_text("proxy: v1\n")
+    config = _base_config(opencloud={"config_dir": str(config_dir)})
+    return apply_module, config, config_dir, events
+
+
+def test_reconcile_runtime_recreates_only_when_mounted_config_changes(monkeypatch, tmp_path):
+    apply_module, config, config_dir, events = _stub_runtime(monkeypatch, tmp_path, {
+        "opencloud": [], "euro-office": [],
+    })
+    env_path = tmp_path / "missing.env"
+
+    apply_module.reconcile_runtime(env_path, config)
+    first_up = next(args for args in events if args[0] == "up")
+    assert "--force-recreate" in first_up
+    assert ("restart-opencloud",) in events
+
+    events.clear()
+    apply_module.reconcile_runtime(env_path, config)
+    second_up = next(args for args in events if args[0] == "up")
+    assert "--force-recreate" not in second_up
+    assert ("restart-opencloud",) not in events
+
+    events.clear()
+    (config_dir / "proxy.yaml").write_text("proxy: v2\n")
+    apply_module.reconcile_runtime(env_path, config)
+    third_up = next(args for args in events if args[0] == "up")
+    assert "--force-recreate" in third_up
+
+
+def test_reconcile_runtime_restarts_opencloud_when_euro_office_came_up(monkeypatch, tmp_path):
+    apply_module, config, _config_dir, events = _stub_runtime(monkeypatch, tmp_path, {
+        "opencloud": [], "euro-office": [],
+    })
+    env_path = tmp_path / "missing.env"
+    apply_module.reconcile_runtime(env_path, config)
+
+    starts = {"opencloud": ["t1", "t1"], "euro-office": ["t1", "t2"]}
+    monkeypatch.setattr(apply_module, "container_started_at", lambda name: starts[name].pop(0))
+    events.clear()
+    apply_module.reconcile_runtime(env_path, config)
+
+    up = next(args for args in events if args[0] == "up")
+    assert "--force-recreate" not in up
+    assert ("restart-opencloud",) in events
+
+
+def test_reconcile_runtime_force_recreate_flag(monkeypatch, tmp_path):
+    apply_module, config, _config_dir, events = _stub_runtime(monkeypatch, tmp_path, {
+        "opencloud": [], "euro-office": [],
+    })
+    env_path = tmp_path / "missing.env"
+    apply_module.reconcile_runtime(env_path, config)
+    events.clear()
+    apply_module.reconcile_runtime(env_path, config, force_recreate=True)
+    up = next(args for args in events if args[0] == "up")
+    assert "--force-recreate" in up
