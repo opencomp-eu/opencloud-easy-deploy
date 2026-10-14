@@ -15,6 +15,9 @@ from typing import Any
 import yaml
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(PROJECT_ROOT / "easydeploy-lib" / "python"))
+import hostfs  # noqa: E402
+
 STATE_DIR = PROJECT_ROOT / ".opencloud-easy-deploy"
 SECRETS_PATH = STATE_DIR / "secrets.yaml"
 DEPLOY_PATH = PROJECT_ROOT / "deploy.yaml"
@@ -294,11 +297,11 @@ def ensure_secrets_paths_exist() -> None:
 def ensure_backup_paths_exist(config: dict) -> None:
     for host_path, _ in backup_source_paths(config):
         if host_path.suffix == ".yaml":
-            host_path.parent.mkdir(parents=True, exist_ok=True)
+            hostfs.ensure_writable_directory(host_path.parent)
             if not host_path.exists():
                 host_path.touch()
         else:
-            host_path.mkdir(parents=True, exist_ok=True)
+            hostfs.ensure_writable_directory(host_path)
 
 
 def render_backup_compose(config: dict) -> None:
@@ -368,8 +371,7 @@ def bootstrap_backup(config: dict, secrets: dict[str, str]) -> None:
         return
     repo = repository_settings(config)
     if repo["type"] == "local":
-        repo_path = Path(repo["path"])
-        repo_path.mkdir(parents=True, exist_ok=True)
+        repo_path = hostfs.ensure_writable_directory(repo["path"])
         os.chmod(repo_path, 0o700)
     ensure_backup_paths_exist(config)
     render_backup_compose(config)

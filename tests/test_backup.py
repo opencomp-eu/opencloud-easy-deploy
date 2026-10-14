@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 import yaml
 
@@ -305,5 +307,53 @@ def test_bootstrap_backup_creates_repo_dir(tmp_path, monkeypatch):
     )
     bootstrap_backup(config, {"BORG_PASSPHRASE": "test-passphrase"})
     assert repo.is_dir()
+    assert (repo.stat().st_mode & 0o777) == 0o700
     assert (backup_dir / ".env").read_text().startswith("# Generated")
+
+
+def test_bootstrap_backup_escalates_when_the_repo_parent_is_not_writable(tmp_path, monkeypatch):
+    from scripts import backup as backup_module
+
+    parent = tmp_path / "var-backups"
+    parent.mkdir()
+    parent.chmod(0o555)
+    repo = parent / "opencloud"
+    data_root = tmp_path / "opencloud"
+    backup_dir = tmp_path / "backup"
+    sudo_cmds: list[list[str]] = []
+
+    def fake_sudo(args, *, noninteractive=False):
+        sudo_cmds.append(list(args))
+        if args[:2] == ["mkdir", "-p"]:
+            parent.chmod(0o755)
+            Path(args[2]).mkdir(parents=True, exist_ok=True)
+
+    monkeypatch.setattr(backup_module.hostfs, "_sudo", fake_sudo)
+    monkeypatch.setattr(backup_module, "BACKUP_DIR", backup_dir)
+    monkeypatch.setattr(backup_module, "BACKUP_COMPOSE", backup_dir / "docker-compose.yml")
+    monkeypatch.setattr(backup_module, "BACKUP_RESTORE_COMPOSE", backup_dir / "docker-compose.restore.yml")
+    monkeypatch.setattr(backup_module, "BACKUP_ENV", backup_dir / ".env")
+    monkeypatch.setattr(backup_module, "BACKUP_SCRIPTS", backup_dir / "scripts")
+    monkeypatch.setattr(backup_module, "BACKUP_RUN_SCRIPT", tmp_path / "run-backup.sh")
+    monkeypatch.setattr(backup_module, "SYSTEMD_DIR", backup_dir / "systemd")
+    (tmp_path / "run-backup.sh").write_text("#!/bin/sh\n")
+    monkeypatch.setattr(backup_module, "STATE_DIR", tmp_path / "state")
+    monkeypatch.setattr(backup_module, "DEPLOY_PATH", tmp_path / "deploy.yaml")
+    (tmp_path / "deploy.yaml").write_text("opencloud: {}\n")
+
+    config = _base_config(
+        opencloud={
+            "data_dir": str(data_root / "data"),
+            "config_dir": str(data_root / "config"),
+            "apps_dir": str(data_root / "apps"),
+        },
+        backup={"enabled": True, "repository": {"type": "local", "path": str(repo)}},
+    )
+    try:
+        bootstrap_backup(config, {"BORG_PASSPHRASE": "test-passphrase"})
+    finally:
+        parent.chmod(0o755)
+
+    assert repo.is_dir()
+    assert ["mkdir", "-p", str(repo)] in sudo_cmds
     assert "BORG_PASSPHRASE=test-passphrase" in (backup_dir / ".env").read_text()
