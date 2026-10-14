@@ -52,3 +52,8 @@ Standalone OpenCloud Caddy (`opencloud_caddy`) is not started in integrate mode.
 ## Bulwark inline iframe
 
 When Stalwart/Bulwark is enabled on the same engine, apply writes `.opencloud-easy-deploy/integration/embed.yaml` with the webmail origin. OpenCloud then allows that origin in CSP `frame-ancestors`, and the document editor (Euro Office / Collabora) allows it too so nested iframes work. To add more parents, set `embed.frame_ancestors` in `deploy.yaml`. Set `embed.managed: false` to ignore the engine sidecar.
+
+## Audit
+
+When the engine's audit log is enabled, apply writes `.opencloud-easy-deploy/integration/audit.yaml`. OpenCloud apply then starts the `audit` service and writes JSON events (including file reads) into the engine spool. Standalone OpenCloud, with no sidecar, does not start that service. Query the log from the engine: `bash audit.sh query --action file.read`.
+

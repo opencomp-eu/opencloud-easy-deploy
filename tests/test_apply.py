@@ -12,9 +12,11 @@ import yaml
 
 from scripts.apply import (
     _network_address,
+    apply_engine_audit_sidecar,
     apply_engine_embed_sidecar,
     apply_engine_oidc_sidecar,
     bootstrap_ldap_tls,
+    build_additional_services,
     build_caddy_site_blocks,
     build_env_vars,
     build_proxy_role_block,
@@ -24,6 +26,7 @@ from scripts.apply import (
     ldap_data_dir,
     office_frame_ancestors_csp,
     opencloud_admin_user_id,
+    render_audit_overlay,
     render_caddyfile,
     render_csp_yaml,
     render_network_overlay,
@@ -684,3 +687,31 @@ def test_reconcile_runtime_force_recreate_flag(monkeypatch, tmp_path):
     apply_module.reconcile_runtime(env_path, config, force_recreate=True)
     up = next(args for args in events if args[0] == "up")
     assert "--force-recreate" in up
+
+
+def test_audit_sidecar_enables_file_audit(tmp_path, monkeypatch):
+    import scripts.apply as apply_module
+
+    spool = tmp_path / "spool"
+    sidecar = tmp_path / "audit.yaml"
+    sidecar.write_text(f"enabled: true\nspool_dir: {spool}\n")
+    overlay = tmp_path / "audit.yml"
+    monkeypatch.setattr(apply_module, "AUDIT_OVERLAY_PATH", overlay)
+    config = _base_config()
+    apply_engine_audit_sidecar(config, sidecar)
+    assert build_additional_services(config) == "audit"
+    assert any(item.endswith("audit.yml") for item in derive_compose_files(config))
+    render_audit_overlay(config)
+    text = overlay.read_text()
+    assert 'AUDIT_FILEPATH: "/var/lib/easydeploy-audit/opencloud.jsonl"' in text
+    assert f"{spool}:/var/lib/easydeploy-audit" in text
+    assert spool.is_dir()
+
+
+def test_audit_sidecar_absent_leaves_services_unchanged():
+    config = _base_config()
+    config["modules"] = {"antivirus": True}
+    apply_engine_audit_sidecar(config, Path("/no/such/audit.yaml"))
+    assert build_additional_services(config) == "antivirus"
+    assert not any(item.endswith("audit.yml") for item in derive_compose_files(config))
+

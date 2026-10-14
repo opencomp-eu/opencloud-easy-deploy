@@ -39,6 +39,9 @@ RUNTIME_FINGERPRINT_PATH = STATE_DIR / "runtime-config.sha256"
 INTEGRATION_DIR = STATE_DIR / "integration"
 INTEGRATION_CADDY_FRAGMENT = INTEGRATION_DIR / "caddy.caddy"
 EMBED_SIDECAR = INTEGRATION_DIR / "embed.yaml"
+AUDIT_SIDECAR = INTEGRATION_DIR / "audit.yaml"
+AUDIT_OVERLAY_PATH = STATE_DIR / "compose" / "audit.yml"
+AUDIT_CONTAINER_DIR = "/var/lib/easydeploy-audit"
 DEFAULT_INTEGRATE_NETWORK = "easydeploy-net"
 PLACEHOLDER_EMBED_HOSTS = frozenset(
     {
@@ -242,6 +245,20 @@ def apply_engine_embed_sidecar(config: dict, sidecar_path: Path | None = None) -
             target["frame_ancestors"] = merged
 
 
+def apply_engine_audit_sidecar(config: dict, sidecar_path: Path | None = None) -> None:
+    """Enable OpenCloud's audit service when the engine asked for a spool."""
+    path = sidecar_path or AUDIT_SIDECAR
+    if not path.is_file():
+        return
+    sidecar = load_yaml(path)
+    if not isinstance(sidecar, dict) or not to_bool(sidecar.get("enabled")):
+        return
+    spool = str(sidecar.get("spool_dir") or "").strip()
+    if not spool or ":" in spool:
+        return
+    config["_audit"] = {"spool_dir": spool}
+
+
 def extra_frame_ancestors(config: dict) -> list[str]:
     embed = config.get("embed") or {}
     if not isinstance(embed, dict):
@@ -269,6 +286,7 @@ def load_config(path: Path = DEPLOY_PATH) -> dict:
     config = load_yaml(path)
     apply_engine_oidc_sidecar(config)
     apply_engine_embed_sidecar(config)
+    apply_engine_audit_sidecar(config)
     return config
 
 
@@ -363,6 +381,8 @@ def derive_compose_files(config: dict) -> list[str]:
         files.append("monitoring/monitoring.yml")
 
     files.append("../.opencloud-easy-deploy/compose/network-fixups.yml")
+    if config.get("_audit"):
+        files.append("../.opencloud-easy-deploy/compose/audit.yml")
 
     return files
 
@@ -542,7 +562,42 @@ def build_additional_services(config: dict) -> str:
     modules = config.get("modules") or {}
     if to_bool(modules.get("antivirus")):
         services.append("antivirus")
+    if config.get("_audit"):
+        services.append("audit")
     return ",".join(services)
+
+
+def render_audit_overlay(config: dict) -> None:
+    """Mount the engine spool and turn on OpenCloud's JSON audit log."""
+    audit = config.get("_audit")
+    if not isinstance(audit, dict):
+        if AUDIT_OVERLAY_PATH.exists():
+            AUDIT_OVERLAY_PATH.unlink()
+        return
+    spool = str(audit.get("spool_dir") or "").strip()
+    body = "\n".join(
+        [
+            "services:",
+            "  opencloud:",
+            "    environment:",
+            '      AUDIT_LOG_TO_CONSOLE: "false"',
+            '      AUDIT_LOG_TO_FILE: "true"',
+            f'      AUDIT_FILEPATH: "{AUDIT_CONTAINER_DIR}/opencloud.jsonl"',
+            "      AUDIT_FORMAT: json",
+            "      AUDIT_LOG_LEVEL: info",
+            "    volumes:",
+            f'      - "{spool}:{AUDIT_CONTAINER_DIR}"',
+            "",
+        ]
+    )
+    AUDIT_OVERLAY_PATH.parent.mkdir(parents=True, exist_ok=True)
+    AUDIT_OVERLAY_PATH.write_text(body)
+    spool_path = Path(spool)
+    spool_path.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(spool_path, 0o1777)
+    except OSError:
+        pass
 
 
 # Upstream opencloud-compose defaults these to :latest.
@@ -1320,6 +1375,7 @@ def apply(
     secret_values = create_or_update_secrets(config, rotate=rotate_secrets)
     bootstrap_config(config)
     render_network_overlay(config)
+    render_audit_overlay(config)
     render_proxy_yaml(config)
     if proxy_mode(config) == "integrate":
         render_integration_fragment(config)
